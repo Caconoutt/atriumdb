@@ -3131,6 +3131,69 @@ class AtriumSDK:
         self.get_all_patients()
         return {pid: self._patient_id_to_mrn[pid] for pid in patient_id_list_int if pid in self._patient_id_to_mrn}
 
+    def dashboard_resolve_cohort(self, request, request_id: str = ""):
+        """Resolve a cohort definition request into validated MRN lists.
+
+        Supports both direct-DB and API modes using the same dual-mode pattern
+        as other SDK methods (e.g. ``get_mrn_to_patient_id_map``):
+
+        - **Direct-DB mode** (``metadata_connection_type`` of ``"sqlite"``,
+          ``"mysql"``, or ``"mariadb"``): the resolution runs in-process,
+          querying the database directly via ``sql_handler``.
+        - **API mode** (``metadata_connection_type="api"``): the request is
+          serialised to JSON and forwarded to the dashboard server at
+          ``POST /cohorts``. The server runs the same resolution logic locally
+          and returns the result as JSON, which is deserialised back into a
+          :class:`~atriumdb.dashboard.schemas.MrnCohortResponse`.
+
+        The ``request`` argument is a
+        :class:`~atriumdb.dashboard.schemas.CohortDefinitionRequest` and the
+        return value is a
+        :class:`~atriumdb.dashboard.schemas.MrnCohortResponse`. Both are
+        Pydantic models defined in ``atriumdb.dashboard.schemas``.
+
+        **Priority 1A** (``request.type == "mrn"``)
+            Each cohort's ``mrnList`` is validated in two steps: existence in
+            the ``patient`` table, then at least one ``encounter`` record
+            within ``admissionDateRange``. MRNs failing either check are
+            silently excluded and logged server-side.
+
+        **Priority 1B** (``request.type == "demographic"``)
+            Candidates are drawn from ``encounter`` rows within
+            ``admissionDateRange`` at the specified location. Each patient's
+            reference admission (earliest in-range visit) anchors the
+            age-at-admission check. Active filters (age, sex) are AND-ed;
+            values within each filter are OR-ed.
+
+        :param request: A
+            :class:`~atriumdb.dashboard.schemas.CohortDefinitionRequest`
+            instance describing the cohort type, the shared admission date
+            range, and one or more cohort definitions.
+        :param request_id: Optional correlation ID attached to log messages
+            and echoed in the response ``requestId`` field. Corresponds to the
+            ``X-Request-ID`` header in the HTTP API.
+        :type request_id: str
+        :return: A
+            :class:`~atriumdb.dashboard.schemas.MrnCohortResponse` containing
+            one resolved ``ResolvedCohort`` per input cohort. Every MRN in the
+            response is confirmed to exist in AtriumDB and to have at least one
+            admission record within the requested date range.
+        :rtype: MrnCohortResponse
+        """
+        from atriumdb.dashboard.schemas import MrnCohortResponse
+        from atriumdb.dashboard.cohort_resolver import resolve_cohorts_local
+
+        if self.metadata_connection_type == "api":
+            raw = self._request(
+                "POST",
+                "cohorts/",
+                json=request.model_dump(),
+                headers={"X-Request-ID": request_id},
+            )
+            return MrnCohortResponse(**raw)
+
+        return resolve_cohorts_local(self, request, request_id)
+
     def insert_patient(self, patient_id: int = None, mrn: str = None, gender: str = None, dob: int = None,
                        first_name: str = None, middle_name: str = None, last_name: str = None, first_seen: int = None,
                        last_updated: int = None, source_id: int = 1, weight: float = None, weight_units: str = None,
