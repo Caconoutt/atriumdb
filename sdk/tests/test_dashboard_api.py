@@ -85,73 +85,73 @@ def _test_api_cohorts(db_type, dataset_location, connection_params):
 
     request_1a = CohortDefinitionRequest(
         type="mrn",
-        admissionDateRange=date_range,
-        cohorts=[MrnCohort(id="cohort_1a", mrnList=["MRN001", "MRN002", "MRN003", "MRN999"])],
+        admission_date_range=date_range,
+        cohorts=[MrnCohort(id="cohort_1a", mrn_list=["MRN001", "MRN002", "MRN003", "MRN999"])],
     )
 
     # MRN001 and MRN002 have in-window encounters; MRN003 is outside the window; MRN999 does not exist
     local_result = sdk.dashboard_resolve_cohort(request_1a, request_id="test-1a-local")
-    assert local_result.requestId == "test-1a-local"
+    assert local_result.request_id == "test-1a-local"
     assert len(local_result.cohorts) == 1
     assert local_result.cohorts[0].id == "cohort_1a"
-    assert set(local_result.cohorts[0].mrnList) == {"MRN001", "MRN002"}
+    assert set(local_result.cohorts[0].mrn_list) == {"MRN001", "MRN002"}
 
     api_result = api_sdk.dashboard_resolve_cohort(request_1a, request_id="test-1a-api")
-    assert set(api_result.cohorts[0].mrnList) == {"MRN001", "MRN002"}
+    assert set(api_result.cohorts[0].mrn_list) == {"MRN001", "MRN002"}
 
     print("Testing 1B: demographic cohort — location filter...")
 
     request_1b_loc = CohortDefinitionRequest(
         type="demographic",
-        admissionDateRange=date_range,
+        admission_date_range=date_range,
         cohorts=[DemographicCohort(id="cohort_1b_loc", location=["ICU"])],
     )
 
     # both in-window patients are in ICU; MRN003 is outside the window
     local_result = sdk.dashboard_resolve_cohort(request_1b_loc)
-    assert set(local_result.cohorts[0].mrnList) == {"MRN001", "MRN002"}
+    assert set(local_result.cohorts[0].mrn_list) == {"MRN001", "MRN002"}
 
     api_result = api_sdk.dashboard_resolve_cohort(request_1b_loc)
-    assert set(api_result.cohorts[0].mrnList) == {"MRN001", "MRN002"}
+    assert set(api_result.cohorts[0].mrn_list) == {"MRN001", "MRN002"}
 
     print("Testing 1B: demographic cohort — sex filter...")
 
     request_1b_sex = CohortDefinitionRequest(
         type="demographic",
-        admissionDateRange=date_range,
+        admission_date_range=date_range,
         cohorts=[DemographicCohort(id="cohort_1b_sex", location=["ICU"], sex=["M"])],
     )
 
     local_result = sdk.dashboard_resolve_cohort(request_1b_sex)
-    assert set(local_result.cohorts[0].mrnList) == {"MRN001"}
+    assert set(local_result.cohorts[0].mrn_list) == {"MRN001"}
 
     api_result = api_sdk.dashboard_resolve_cohort(request_1b_sex)
-    assert set(api_result.cohorts[0].mrnList) == {"MRN001"}
+    assert set(api_result.cohorts[0].mrn_list) == {"MRN001"}
 
     print("Testing 1B: demographic cohort — age filter...")
 
     # patient A is 25 years old at admission → falls in [20, 30]; patient B is 35 → does not
     request_1b_age = CohortDefinitionRequest(
         type="demographic",
-        admissionDateRange=date_range,
+        admission_date_range=date_range,
         cohorts=[DemographicCohort(
             id="cohort_1b_age",
             location=["ICU"],
-            age=[AgeBand(startNs=20 * ONE_YEAR_NS, endNs=30 * ONE_YEAR_NS)],
+            age=[AgeBand(start_ns=20 * ONE_YEAR_NS, end_ns=30 * ONE_YEAR_NS)],
         )],
     )
 
     local_result = sdk.dashboard_resolve_cohort(request_1b_age)
-    assert set(local_result.cohorts[0].mrnList) == {"MRN001"}
+    assert set(local_result.cohorts[0].mrn_list) == {"MRN001"}
 
     api_result = api_sdk.dashboard_resolve_cohort(request_1b_age)
-    assert set(api_result.cohorts[0].mrnList) == {"MRN001"}
+    assert set(api_result.cohorts[0].mrn_list) == {"MRN001"}
 
     print("Testing 1B: demographic cohort — multiple cohorts in one request...")
 
     request_multi = CohortDefinitionRequest(
         type="demographic",
-        admissionDateRange=date_range,
+        admission_date_range=date_range,
         cohorts=[
             DemographicCohort(id="male_icu",  location=["ICU"], sex=["M"]),
             DemographicCohort(id="female_icu", location=["ICU"], sex=["F"]),
@@ -160,12 +160,12 @@ def _test_api_cohorts(db_type, dataset_location, connection_params):
 
     local_result = sdk.dashboard_resolve_cohort(request_multi)
     assert len(local_result.cohorts) == 2
-    cohorts_by_id = {c.id: set(c.mrnList) for c in local_result.cohorts}
+    cohorts_by_id = {c.id: set(c.mrn_list) for c in local_result.cohorts}
     assert cohorts_by_id["male_icu"] == {"MRN001"}
     assert cohorts_by_id["female_icu"] == {"MRN002"}
 
     api_result = api_sdk.dashboard_resolve_cohort(request_multi)
-    cohorts_by_id = {c.id: set(c.mrnList) for c in api_result.cohorts}
+    cohorts_by_id = {c.id: set(c.mrn_list) for c in api_result.cohorts}
     assert cohorts_by_id["male_icu"] == {"MRN001"}
     assert cohorts_by_id["female_icu"] == {"MRN002"}
 

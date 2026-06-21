@@ -84,18 +84,18 @@ def resolve_cohorts_local(
     if request.type == "mrn":
         for cohort in request.cohorts:
             mrns = _resolve_mrn_cohort(
-                sdk, cohort, request.admissionDateRange, request_id
+                sdk, cohort, request.admission_date_range, request_id
             )
-            resolved.append(ResolvedCohort(id=cohort.id, mrnList=mrns))
+            resolved.append(ResolvedCohort(id=cohort.id, mrn_list=mrns))
 
     elif request.type == "demographic":
         for cohort in request.cohorts:
             mrns = _resolve_demographic_cohort(
-                sdk, cohort, request.admissionDateRange
+                sdk, cohort, request.admission_date_range
             )
-            resolved.append(ResolvedCohort(id=cohort.id, mrnList=mrns))
+            resolved.append(ResolvedCohort(id=cohort.id, mrn_list=mrns))
 
-    return MrnCohortResponse(requestId=request_id, cohorts=resolved)
+    return MrnCohortResponse(request_id=request_id, cohorts=resolved)
 
 
 def _resolve_mrn_cohort(
@@ -131,7 +131,7 @@ def _resolve_mrn_cohort(
         empty if no MRNs in the input passed.
     """
     # Step 0 — normalise (trim whitespace per Assumption §5)
-    mrn_input = [m.strip() for m in cohort.mrnList]
+    mrn_input = [m.strip() for m in cohort.mrn_list]
 
     # Step 1 — existence check
     mrn_to_pid: dict[str, int] = sdk.get_mrn_to_patient_id_map(mrn_list=mrn_input)
@@ -284,7 +284,7 @@ def _resolve_demographic_cohort(
             else:
                 age_at_admission_ns = admit_time_ns - dob_ns
                 age_ok = any(
-                    band.startNs <= age_at_admission_ns <= band.endNs
+                    band.start_ns <= age_at_admission_ns <= band.end_ns
                     for band in cohort.age
                 )
 

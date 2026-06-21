@@ -3187,10 +3187,10 @@ class AtriumSDK:
             raw = self._request(
                 "POST",
                 "cohorts/",
-                json=request.model_dump(),
+                json=request.model_dump(by_alias=True),
                 headers={"X-Request-ID": request_id},
             )
-            return MrnCohortResponse(**raw)
+            return MrnCohortResponse.model_validate(raw)
 
         return resolve_cohorts_local(self, request, request_id)
 

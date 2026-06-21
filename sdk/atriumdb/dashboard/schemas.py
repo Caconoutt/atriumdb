@@ -19,10 +19,19 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
+from pydantic.alias_generators import to_camel
 
 
-class AdmissionDateRange(BaseModel):
+class _Base(BaseModel):
+    """Shared config: snake_case in Python, camelCase in JSON."""
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
+
+
+class AdmissionDateRange(_Base):
     """Inclusive admission window, both bounds in Unix epoch nanoseconds (UTC).
 
     Used to scope which encounters are considered when resolving a cohort. An
@@ -34,7 +43,7 @@ class AdmissionDateRange(BaseModel):
     end: int
 
 
-class AgeBand(BaseModel):
+class AgeBand(_Base):
     """A single age band expressed in nanoseconds.
 
     Both bounds are pre-converted by the dashboard server using the convention::
@@ -45,24 +54,24 @@ class AgeBand(BaseModel):
     further unit conversion.
     """
 
-    startNs: int
-    endNs: int
+    start_ns: int
+    end_ns: int
 
 
-class MrnCohort(BaseModel):
+class MrnCohort(_Base):
     """A cohort defined by an explicit list of MRNs (Priority 1A).
 
-    Each MRN in ``mrnList`` is validated against AtriumDB: it must both exist
+    Each MRN in ``mrn_list`` is validated against AtriumDB: it must both exist
     in the ``patient`` table and have at least one ``encounter`` record within
-    the request's ``admissionDateRange``. MRNs that fail either check are
+    the request's ``admission_date_range``. MRNs that fail either check are
     silently excluded and logged server-side.
     """
 
     id: str
-    mrnList: list[str]
+    mrn_list: list[str]
 
 
-class DemographicCohort(BaseModel):
+class DemographicCohort(_Base):
     """A cohort defined by demographic filters (Priority 1B).
 
     All supplied filters are ANDed together; within each filter the individual
@@ -79,7 +88,7 @@ class DemographicCohort(BaseModel):
     :param location: Optional list of API location codes (e.g. ``["ICU"]``).
         Resolved server-side via ``LOCATION_LOOKUP`` against ``unit.name``.
         ``None`` means no location filter — all admitted patients qualify.
-    :param valueRange: Reserved for future vital-sign range filtering; unused
+    :param value_range: Reserved for future vital-sign range filtering; unused
         in Priority 1B.
     """
 
@@ -87,10 +96,10 @@ class DemographicCohort(BaseModel):
     age: list[AgeBand] | None = None
     sex: list[str] | None = None
     location: list[str] | None = None
-    valueRange: dict | None = None
+    value_range: dict | None = None
 
 
-class CohortDefinitionRequest(BaseModel):
+class CohortDefinitionRequest(_Base):
     """Top-level request body for ``POST /cohorts``.
 
     The ``type`` field routes the entire request to either the MRN-validation
@@ -98,7 +107,7 @@ class CohortDefinitionRequest(BaseModel):
     request must be of the same type.
 
     :param type: ``"mrn"`` → 1A; ``"demographic"`` → 1B.
-    :param admissionDateRange: Applies to both routes. In 1A it defines the
+    :param admission_date_range: Applies to both routes. In 1A it defines the
         window an MRN must have an admission in. In 1B it both scopes the
         candidate encounter pool and provides the per-patient ``admit_time_ns``
         anchor needed to compute age-at-admission correctly.
@@ -107,31 +116,31 @@ class CohortDefinitionRequest(BaseModel):
     """
 
     type: Literal["mrn", "demographic"]
-    admissionDateRange: AdmissionDateRange
+    admission_date_range: AdmissionDateRange
     cohorts: list[MrnCohort] | list[DemographicCohort]
 
 
-class ResolvedCohort(BaseModel):
+class ResolvedCohort(_Base):
     """A single resolved cohort in the response.
 
     :param id: The cohort identifier echoed from the request.
-    :param mrnList: Validated MRNs that passed all filters. Every MRN here is
+    :param mrn_list: Validated MRNs that passed all filters. Every MRN here is
         confirmed to exist in AtriumDB and have an admission in the requested
         date range.
     """
 
     id: str
-    mrnList: list[str]
+    mrn_list: list[str]
 
 
-class MrnCohortResponse(BaseModel):
+class MrnCohortResponse(_Base):
     """Response body for ``POST /cohorts``.
 
-    :param requestId: Echo of the ``X-Request-ID`` request header, or an empty
+    :param request_id: Echo of the ``X-Request-ID`` request header, or an empty
         string if the header was omitted.
     :param cohorts: One ``ResolvedCohort`` per input cohort, in the same order
         as the request.
     """
 
-    requestId: str
+    request_id: str
     cohorts: list[ResolvedCohort]
