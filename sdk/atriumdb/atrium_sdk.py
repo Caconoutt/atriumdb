@@ -5382,8 +5382,8 @@ of DatasetIterator objects depending on the value of num_iterators.
             # get new API token
             self._refresh_token()
 
-        # Set the authorization header using the stored access token.
-        headers = {'Authorization': f"Bearer {self.token}"}
+        # Merge the Authorization header with any caller-supplied headers (e.g. X-Request-ID).
+        headers = {'Authorization': f"Bearer {self.token}", **kwargs.pop('headers', {})}
 
         # Send the API request using the specified method, URL, headers, and any additional arguments.
         response = requests.request(method, url, headers=headers, **kwargs)
