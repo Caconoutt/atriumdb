@@ -74,9 +74,9 @@ keyed on the triple `(tag, freq_nhz, unit_code)`; no AtriumDB ids are carried.
 `Special Measures` is not a measure list — it documents the kPa→mmHg variants whose rows
 already live in the Vital Sign tab; the generator uses it only to confirm the factor.
 
-## Notes / improvements over the draft spec
+## Notes
 
-These were applied while implementing; none change the spec's intent:
+These corrections were applied while implementing; none change the spec's intent:
 
 1. **`freq_nhz` correction.** The workbook displays the numeric sampling rate rounded to
    `0.976562` Hz, but the true rate is `1000/1024` Hz = `0.9765625` Hz = exactly
