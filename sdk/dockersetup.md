@@ -57,7 +57,37 @@ extension). Subsequent builds are much faster because Docker caches unchanged la
 
 ---
 
-## 4. Run the dashboard tests
+## 4. Mount a real dataset (optional)
+
+The host path to your dataset is stored in `sdk/docker-run-dataset.sh` (gitignored).
+Open that file and set `HOST_DATASET_PATH` to your absolute Mac path — that is the only
+place you ever need to edit. Then run the script from the `sdk/` directory:
+
+```bash
+chmod +x docker-run-dataset.sh   # one-time, makes the script executable
+./docker-run-dataset.sh
+```
+
+This drops you into an interactive shell inside the container with:
+- your dataset mounted at `/data/atriumdb` (where the SDK expects `meta/index.db` and `tsc/`)
+- the `sdk/` source tree mounted at `/sdk` so edits on your Mac are live inside the container
+- `ATRIUMDB_DATASET_LOCATION=/data/atriumdb` injected from `.env`
+
+To run a specific test file instead of opening a shell, pass the pytest command as an argument:
+
+```bash
+./docker-run-dataset.sh python -m pytest tests/test_dashboard_real_data.py -v -s
+```
+To run a specific function in the file.
+```base
+./docker-run-dataset.sh python -m pytest tests/test_dashboard_real_data.py::test_inspect_real_dataset -v -s
+```
+
+The `"$@"` in the script forwards any arguments you append before `atriumdb-sdk bash`.
+
+---
+
+## 5. Run the dashboard tests
 
 ```bash
 docker run --rm atriumdb-sdk
@@ -83,7 +113,7 @@ PASSED
 
 ---
 
-## 5. Run a specific test or the full test suite
+## 6. Run a specific test or the full test suite
 
 Override the default command by appending your own `pytest` invocation:
 
@@ -100,7 +130,7 @@ docker run --rm atriumdb-sdk python -m pytest tests/ -v
 
 ---
 
-## 6. Open an interactive shell inside the container
+## 7. Open an interactive shell inside the container
 
 Useful for exploring, debugging, or running ad-hoc Python code against the SDK:
 
@@ -124,7 +154,7 @@ Type `exit` to leave the container.
 
 ---
 
-## 7. Iterate on the source code without rebuilding
+## 8. Iterate on the source code without rebuilding
 
 Mount your local `sdk/` directory into the container so that edits on your Mac are
 immediately visible inside the container — no rebuild needed:
@@ -147,7 +177,7 @@ docker run --rm -it \
 
 ---
 
-## 8. Rebuild after dependency changes
+## 9. Rebuild after dependency changes
 
 If you add or change a dependency in `pyproject.toml`, or change the `Dockerfile`
 itself, rebuild the image:
@@ -167,4 +197,6 @@ docker build -t atriumdb-sdk .
 | Run all tests | `docker run --rm atriumdb-sdk python -m pytest tests/ -v` |
 | Interactive shell | `docker run --rm -it atriumdb-sdk bash` |
 | Shell with live source | `docker run --rm -it -v "$(pwd)":/sdk atriumdb-sdk bash` |
+| Shell with real dataset | `./docker-run-dataset.sh` |
+| Run real-data tests | `./docker-run-dataset.sh python -m pytest tests/test_dashboard_real_data.py -v -s` |
 | Remove image | `docker rmi atriumdb-sdk` |
