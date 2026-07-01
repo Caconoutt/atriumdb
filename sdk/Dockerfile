@@ -2,8 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /sdk
 
-# System libraries required by the mariadb Python C extension (pulled in by [testing]).
-# gcc is needed to compile the extension; libmariadb-dev provides the MariaDB client headers.
+# gcc and libmariadb-dev are required by the mariadb Python C extension.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc \
         libmariadb-dev \
