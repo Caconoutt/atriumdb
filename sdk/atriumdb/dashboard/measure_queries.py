@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from atriumdb import AtriumSDK
 
-logger = logging.getLogger(__name__)
+_LOGGER = logging.getLogger(__name__)
 
 _NS_PER_HOUR = 3_600_000_000_000
 
@@ -97,5 +97,5 @@ def query_measure_total_hours(sdk: "AtriumSDK") -> list[dict]:
         entry["total_hours"] = (entry["total_ns"] or 0) / _NS_PER_HOUR
         result.append(entry)
 
-    logger.debug("query_measure_total_hours: returned %d measures", len(result))
+    _LOGGER.debug("%d measures queried for hours. ", len(result))
     return result
