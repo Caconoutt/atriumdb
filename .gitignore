@@ -183,3 +183,8 @@ cython_debug/
 /sandbox.py
 /sdk/tests/test_datasets/
 /sdk/tests/wfdb_data/
+
+# local docker test
+/sdk/docker-run-dataset.sh
+/sdk/tests/measure_hours_report.log
+/sdk/bin/
