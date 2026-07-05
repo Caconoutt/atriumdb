@@ -55,48 +55,48 @@ def sdk():
 # Step 1 — discovery: run this first to learn what is in the dataset
 # ---------------------------------------------------------------------------
 
-def test_inspect_real_dataset(sdk):
-    """Print a summary of patients, MRNs, encounters, and units in the dataset.
+# def test_inspect_real_dataset(sdk):
+#     """Print a summary of patients, MRNs, encounters, and units in the dataset.
 
-    Run with -v -s to see the full output.  Use this output to fill in the
-    real MRNs and date ranges used by the tests below.
-    """
-    patients = sdk.sql_handler.select_all_patients_in_list()
-    print(f"\n{'='*60}")
-    print(f"PATIENTS ({len(patients)} total — showing first 30)")
-    print(f"{'='*60}")
-    print(f"  {'id':>6}  {'mrn':<20}  {'gender':<8}  {'dob (ns)'}")
-    for row in patients[:30]:
-        pid, mrn, gender, dob = row[0], row[1], row[2], row[3]
-        print(f"  {pid:>6}  {str(mrn):<20}  {str(gender):<8}  {dob}")
-    if len(patients) > 30:
-        print(f"  ... and {len(patients) - 30} more")
+#     Run with -v -s to see the full output.  Use this output to fill in the
+#     real MRNs and date ranges used by the tests below.
+#     """
+#     patients = sdk.sql_handler.select_all_patients_in_list()
+#     print(f"\n{'='*60}")
+#     print(f"PATIENTS ({len(patients)} total — showing first 30)")
+#     print(f"{'='*60}")
+#     print(f"  {'id':>6}  {'mrn':<20}  {'gender':<8}  {'dob (ns)'}")
+#     for row in patients[:30]:
+#         pid, mrn, gender, dob = row[0], row[1], row[2], row[3]
+#         print(f"  {pid:>6}  {str(mrn):<20}  {str(gender):<8}  {dob}")
+#     if len(patients) > 30:
+#         print(f"  ... and {len(patients) - 30} more")
 
-    encounters = sdk.sql_handler.select_patient_encounters()
-    print(f"\n{'='*60}")
-    print(f"ENCOUNTERS ({len(encounters)} total — showing first 20)")
-    print(f"{'='*60}")
-    print(f"  {'enc_id':>7}  {'patient_id':>10}  {'visit_number':<16}  "
-          f"{'unit_name':<12}  start_time_ns")
-    for row in encounters[:20]:
-        enc_id, pid, visit, bed_id, unit_id, unit_name, start_ns, end_ns = row
-        print(f"  {enc_id:>7}  {pid:>10}  {str(visit):<16}  "
-              f"{str(unit_name):<12}  {start_ns}")
+#     encounters = sdk.sql_handler.select_patient_encounters()
+#     print(f"\n{'='*60}")
+#     print(f"ENCOUNTERS ({len(encounters)} total — showing first 20)")
+#     print(f"{'='*60}")
+#     print(f"  {'enc_id':>7}  {'patient_id':>10}  {'visit_number':<16}  "
+#           f"{'unit_name':<12}  start_time_ns")
+#     for row in encounters[:20]:
+#         enc_id, pid, visit, bed_id, unit_id, unit_name, start_ns, end_ns = row
+#         print(f"  {enc_id:>7}  {pid:>10}  {str(visit):<16}  "
+#               f"{str(unit_name):<12}  {start_ns}")
 
-    if encounters:
-        start_times = [r[6] for r in encounters if r[6] is not None]
-        if start_times:
-            print(f"\n  Encounter start_time range:")
-            print(f"    min = {min(start_times)}")
-            print(f"    max = {max(start_times)}")
+#     if encounters:
+#         start_times = [r[6] for r in encounters if r[6] is not None]
+#         if start_times:
+#             print(f"\n  Encounter start_time range:")
+#             print(f"    min = {min(start_times)}")
+#             print(f"    max = {max(start_times)}")
 
-    print(f"\n{'='*60}")
-    print("HINT: copy MRNs from the patient list above into")
-    print("test_mrn_cohort_real_data, and set admit_start_ns / admit_end_ns")
-    print("to bracket the encounter start_time range shown above.")
-    print(f"{'='*60}\n")
+#     print(f"\n{'='*60}")
+#     print("HINT: copy MRNs from the patient list above into")
+#     print("test_mrn_cohort_real_data, and set admit_start_ns / admit_end_ns")
+#     print("to bracket the encounter start_time range shown above.")
+#     print(f"{'='*60}\n")
 
-    assert len(patients) > 0, "Dataset has no patients — check the mount path."
+#     assert len(patients) > 0, "Dataset has no patients — check the mount path."
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +182,7 @@ def test_inspect_real_dataset(sdk):
 # ---------------------------------------------------------------------------
 # Step 4 — measure coverage (measures/hours API)
 #
-# Queries interval_index only (the authoritative coverage table) and writes
+# Queries block_index, converts num_values → hours via freq_nhz, and writes
 # a human-readable report to LOG_PATH.
 # ---------------------------------------------------------------------------
 
@@ -200,17 +200,16 @@ def _fmt_hours(h: float) -> str:
 
 
 def test_measure_hours_report(sdk):
-    """Write a per-measure coverage report from interval_index to LOG_PATH.
+    """Write a per-measure coverage report from block_index to LOG_PATH.
 
-    Uses only ``interval_index``, which records true continuous data coverage
-    (intra-block gaps are excluded at write time). Asserts all totals are
-    non-negative. Read the log file after the run for a human-friendly table.
+    Counts stored samples from ``block_index`` and converts to hours using
+    each measure's ``freq_nhz``. Asserts all totals are non-negative. Read
+    the log file after the run for a human-friendly table.
     """
     rows = query_measure_total_hours(sdk)
 
     if not rows:
-        pytest.skip("interval_index is empty — dataset may have been ingested "
-                    "with interval_index_mode='disable'.")
+        pytest.skip("block_index is empty — dataset has no ingested blocks.")
 
     for row in rows:
         assert row["total_hours"] >= 0, (
@@ -219,27 +218,26 @@ def test_measure_hours_report(sdk):
 
     timestamp = datetime.datetime.now().isoformat(timespec="seconds")
     lines = [
-        "=" * 72,
+        "=" * 66,
         f"  AtriumDB Measure Coverage Report  —  {timestamp}",
         f"  Dataset : {DATASET_LOCATION}",
-        f"  Source  : interval_index  ({len(rows)} measures)",
-        "=" * 72,
+        f"  Source  : block_index  ({len(rows)} measures)",
+        "=" * 66,
         "",
-        f"  {'ID':>6}  {'tag':<30}  {'units':<12}  {'devices':>7}  {'total_hours':>14}",
-        "-" * 72,
+        f"  {'ID':>6}  {'tag':<30}  {'units':<12}  {'total_hours':>14}",
+        "-" * 66,
     ]
     for r in rows:
         lines.append(
             f"  {r['measure_id']:>6}  {str(r['measure_tag'] or ''):<30}"
-            f"  {str(r['units'] or ''):<12}  {r['num_devices']:>7}"
-            f"  {_fmt_hours(r['total_hours']):>14}"
+            f"  {str(r['units'] or ''):<12}  {_fmt_hours(r['total_hours']):>14}"
         )
     grand = sum(r["total_hours"] for r in rows)
     lines += [
-        "-" * 72,
-        f"  {'':>6}  {'TOTAL':<30}  {'':>12}  {'':>7}  {_fmt_hours(grand):>14}",
+        "-" * 66,
+        f"  {'':>6}  {'TOTAL':<30}  {'':>12}  {_fmt_hours(grand):>14}",
         "",
-        "=" * 72,
+        "=" * 66,
         "",
     ]
     report = "\n".join(lines)

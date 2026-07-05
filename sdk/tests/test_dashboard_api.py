@@ -201,23 +201,25 @@ def _test_api_measure_total_hours(db_type, dataset_location, connection_params):
     dev1_id = sdk.insert_device(device_tag="monitor_1")
     dev2_id = sdk.insert_device(device_tag="monitor_2")
 
-    # Seed interval_index directly — no C library (libTSC.so) needed.
-    # The query under test only reads interval_index, so this is sufficient.
-    #
-    # Intervals in nanoseconds:
-    #   HR  / device 1 → 2 h  = 7_200_000_000_000 ns
-    #   HR  / device 2 → 1 h  = 3_600_000_000_000 ns
-    #   SpO2/ device 1 → 1 h  = 3_600_000_000_000 ns
+    # Seed block_index directly — no C library (libTSC.so) needed.
+    # The query under test reads block_index.num_values and converts to hours
+    # using freq_nhz.  HR and SpO2 both have freq=1 Hz → freq_nhz=1_000_000_000.
+    #   HR   / device 1 → 7200 values  (= 2 h at 1 Hz)
+    #   HR   / device 2 → 3600 values  (= 1 h at 1 Hz)
+    #   SpO2 / device 1 → 3600 values  (= 1 h at 1 Hz)
     _NS_PER_HOUR = 3_600_000_000_000
     base_ns = 1_700_000_000 * 1_000_000_000
-    sdk.sql_handler.insert_intervals([
-        {"measure_id": hr_id,   "device_id": dev1_id,
-         "start_time_n": base_ns, "end_time_n": base_ns + 2 * _NS_PER_HOUR},
-        {"measure_id": hr_id,   "device_id": dev2_id,
-         "start_time_n": base_ns, "end_time_n": base_ns + 1 * _NS_PER_HOUR},
-        {"measure_id": spo2_id, "device_id": dev1_id,
-         "start_time_n": base_ns, "end_time_n": base_ns + 1 * _NS_PER_HOUR},
-    ])
+    with sdk.sql_handler.connection(begin=True) as (conn, cursor):
+        cursor.executemany(
+            "INSERT INTO block_index "
+            "(measure_id, device_id, file_id, start_byte, num_bytes, start_time_n, end_time_n, num_values) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (hr_id,   dev1_id, 0, 0, 0, base_ns, base_ns + 2 * _NS_PER_HOUR, 7200),
+                (hr_id,   dev2_id, 0, 0, 0, base_ns, base_ns + 1 * _NS_PER_HOUR, 3600),
+                (spo2_id, dev1_id, 0, 0, 0, base_ns, base_ns + 1 * _NS_PER_HOUR, 3600),
+            ],
+        )
 
     print("Testing measure_total_hours: local helper...")
 
@@ -227,11 +229,11 @@ def _test_api_measure_total_hours(db_type, dataset_location, connection_params):
     by_tag = {r["measure_tag"]: r for r in local_result}
 
     assert set(by_tag["HR"].keys()) == {"measure_id", "measure_tag", "freq_nhz", "units",
-                                        "num_devices", "total_ns", "total_hours"}
+                                        "total_num_values", "total_ns", "total_hours"}
     assert abs(by_tag["HR"]["total_hours"] - 3.0) < 1e-6
-    assert by_tag["HR"]["num_devices"] == 2
+    assert by_tag["HR"]["total_num_values"] == 10800
     assert abs(by_tag["SpO2"]["total_hours"] - 1.0) < 1e-6
-    assert by_tag["SpO2"]["num_devices"] == 1
+    assert by_tag["SpO2"]["total_num_values"] == 3600
 
     print("Testing measure_total_hours: API endpoint GET /measures/hours...")
 
@@ -247,8 +249,8 @@ def _test_api_measure_total_hours(db_type, dataset_location, connection_params):
     by_tag_api = {r["measure_tag"]: r for r in api_result}
 
     assert abs(by_tag_api["HR"]["total_hours"] - 3.0) < 1e-6
-    assert by_tag_api["HR"]["num_devices"] == 2
+    assert by_tag_api["HR"]["total_num_values"] == 10800
     assert abs(by_tag_api["SpO2"]["total_hours"] - 1.0) < 1e-6
-    assert by_tag_api["SpO2"]["num_devices"] == 1
+    assert by_tag_api["SpO2"]["total_num_values"] == 3600
 
     print("All measure_total_hours tests passed.")
