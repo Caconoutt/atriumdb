@@ -17,12 +17,15 @@
 
 """Dashboard-layer helpers for measure-level coverage statistics.
 
-``interval_index`` holds one row per continuous stretch of data per
-``(measure_id, device_id)`` pair. Rows within a pair are non-overlapping by
-the SDK's write invariant (gaps inside a TSC block are stripped out by
-``find_intervals()`` before writing), so a plain
-``SUM(end_time_n - start_time_n) GROUP BY measure_id`` gives the true
-data-coverage total without double-counting or gap inflation.
+Uses ``block_index`` to count stored samples per ``(measure_id, device_id)``
+block, then converts to nanoseconds using the measure's sampling frequency
+(``freq_nhz``, stored in nano-Hz).  The conversion is:
+
+    period_ns  = 10^18 / freq_nhz        (since freq_nhz = Hz × 10^9)
+    total_ns   = SUM(num_values) × period_ns
+
+This gives the amount of *recorded data* in time units, aggregated across all
+devices for each measure.
 
 Only runs in direct-DB mode (``metadata_connection_type`` of ``"sqlite"``,
 ``"mysql"``, or ``"mariadb"``).
@@ -42,16 +45,15 @@ _NS_PER_HOUR = 3_600_000_000_000
 
 _MEASURE_TOTAL_HOURS_SQL = """
     SELECT
-        m.id                                                        AS measure_id,
-        m.tag                                                       AS measure_tag,
+        m.id                          AS measure_id,
+        m.tag                         AS measure_tag,
         m.freq_nhz,
-        m.unit                                                      AS units,
-        COUNT(DISTINCT ii.device_id)                                AS num_devices,
-        SUM(ii.end_time_n - ii.start_time_n)                       AS total_ns
-    FROM interval_index ii
-    JOIN measure m ON m.id = ii.measure_id
-    GROUP BY ii.measure_id
-    ORDER BY total_ns DESC
+        m.unit                        AS units,
+        SUM(bi.num_values)            AS total_num_values
+    FROM block_index bi
+    JOIN measure m ON m.id = bi.measure_id
+    WHERE m.freq_nhz > 0
+    GROUP BY bi.measure_id
 """
 
 _MEASURE_TOTAL_HOURS_KEYS = (
@@ -59,32 +61,28 @@ _MEASURE_TOTAL_HOURS_KEYS = (
     "measure_tag",
     "freq_nhz",
     "units",
-    "num_devices",
-    "total_ns",
+    "total_num_values",
 )
 
 
 def query_measure_total_hours(sdk: "AtriumSDK") -> list[dict]:
-    """Return true data-coverage hours per measure across all devices.
+    """Return data-coverage hours per measure across all devices.
 
-    Sums ``interval_index`` rows, which record only continuous stretches of
-    actual data (intra-block gaps are already excluded at write time by
-    ``find_intervals()``). This is the authoritative coverage figure.
-
-    Returns an empty list when ``interval_index_mode="disable"`` was used
-    during ingestion.
+    Counts stored samples from ``block_index``, then converts to hours using
+    each measure's ``freq_nhz``.  Measures with ``freq_nhz = 0`` (aperiodic /
+    annotation signals) are excluded.
 
     :param sdk: AtriumSDK instance in direct-DB mode.
-    :return: List of dicts, one per measure, ordered by ``total_ns`` descending::
+    :return: List of dicts, one per measure, ordered by ``total_hours`` descending::
 
             {
-                "measure_id":  int,
-                "measure_tag": str | None,
-                "freq_nhz":    int,
-                "units":       str | None,
-                "num_devices": int,
-                "total_ns":    int,
-                "total_hours": float,
+                "measure_id":      int,
+                "measure_tag":     str | None,
+                "freq_nhz":        int,
+                "units":           str | None,
+                "total_num_values": int,
+                "total_ns":        float,
+                "total_hours":     float,
             }
     """
     with sdk.sql_handler.connection(begin=False) as (conn, cursor):
@@ -94,8 +92,14 @@ def query_measure_total_hours(sdk: "AtriumSDK") -> list[dict]:
     result = []
     for row in rows:
         entry = dict(zip(_MEASURE_TOTAL_HOURS_KEYS, row))
-        entry["total_hours"] = (entry["total_ns"] or 0) / _NS_PER_HOUR
+        total_num_values = entry["total_num_values"] or 0
+        freq_nhz = entry["freq_nhz"] or 0
+        # period_ns = 1e18 / freq_nhz  (freq_nhz = Hz × 1e9, so period_ns = 1e9/Hz = 1e18/freq_nhz)
+        total_ns = total_num_values * 1e18 / freq_nhz if freq_nhz > 0 else 0.0
+        entry["total_ns"] = total_ns
+        entry["total_hours"] = total_ns / _NS_PER_HOUR
         result.append(entry)
 
-    _LOGGER.debug("%d measures queried for hours. ", len(result))
+    result.sort(key=lambda x: x["total_hours"], reverse=True)
+    _LOGGER.debug("%d measures queried for hours.", len(result))
     return result
