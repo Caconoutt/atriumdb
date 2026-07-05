@@ -21,6 +21,7 @@ Workflow
    works end-to-end against the real schema.
 """
 
+import json
 import os
 import datetime
 
@@ -242,8 +243,13 @@ def test_measure_hours_report(sdk):
     ]
     report = "\n".join(lines)
 
+    raw_json = json.dumps(rows, indent=2)
+
     with open(LOG_PATH, "w", encoding="utf-8") as fh:
         fh.write(report)
+        fh.write("\n\n--- RAW JSON ---\n\n")
+        fh.write(raw_json)
+        fh.write("\n")
 
     print(f"\nMeasure coverage report written to: {LOG_PATH}")
     print(report)
