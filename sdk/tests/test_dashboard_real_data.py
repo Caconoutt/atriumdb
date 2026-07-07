@@ -32,6 +32,7 @@ from atriumdb.dashboard.schemas import (
     CohortDefinitionRequest,
     DemographicCohort,
     MrnCohort,
+    PatientAdmission,
 )
 
 DATASET_LOCATION = os.environ.get("ATRIUMDB_DATASET_LOCATION")
@@ -99,103 +100,189 @@ def test_inspect_real_dataset(sdk):
 # ---------------------------------------------------------------------------
 # Step 2 — MRN cohort (Priority 1A)
 #
-# TODO: replace the placeholder MRNs and date range with real values from
-#       the test_inspect_real_dataset output above.
+# Admission window: 2020-01-01 00:00:00 UTC → 2021-01-01 00:00:00 UTC.
+#
+# MRN_COHORTS: list of (cohort_id, mrn_list) pairs — one cohort per entry.
+# EXPECTED_MRN_COHORTS: maps cohort_id → set of MRNs expected to resolve.
+#   - MRNs in the input but NOT in the expected set are expected to be
+#     excluded (don't exist or have no in-window encounter).
+#   - Leave the dict empty while still exploring; the test still runs and
+#     prints resolved MRNs without asserting specific values.
 # ---------------------------------------------------------------------------
 
-# Paste real MRNs here after running test_inspect_real_dataset.
-KNOWN_MRNS: list[str] = [
-    # "12345678",
-    # "87654321",
+MRN_ADMIT_START_NS: int = 1577836800000000000  # 2020-01-01 00:00:00 UTC
+MRN_ADMIT_END_NS:   int = 1609459200000000000  # 2021-01-01 00:00:00 UTC
+
+MRN_COHORTS: list[tuple[str, list[str]]] = [
+    ("cohort_a", ["MRN3E7DB077", "MRN3279EDCF", "MRN824A6D3E", "MRNFD5F56B4"]),
+    ("cohort_b", ["MRN885332B7", "MRN9D06E5D3"]),
 ]
 
-# Set this to bracket the encounter start_time values shown by inspection.
-# Both values are Unix epoch nanoseconds.
-ADMIT_START_NS: int = 0       # TODO: replace with real lower bound
-ADMIT_END_NS: int = 10 ** 19  # TODO: replace with real upper bound (far future catches all)
+# Maps cohort_id → expected set of MRNs.
+EXPECTED_MRN_COHORTS: dict[str, set[str]] = {
+    "cohort_a": {"MRN3E7DB077", "MRN3279EDCF", "MRN824A6D3E"},  # MRNFD5F56B4 excluded (non-existent)
+    "cohort_b": {"MRN885332B7", "MRN9D06E5D3"},
+}
+
+# Maps cohort_id → {mrn: admission_ns}.
+# Fill in once you know the admission_ns values from the printed output below.
+# Only cohorts with entries here are validated on admission time.
+EXPECTED_MRN_ADMISSIONS: dict[str, dict[str, int]] = {
+    "cohort_a": {
+        "MRN3E7DB077": 1584420294000000000,
+        "MRN3279EDCF": 1602609105000000000,
+        "MRN824A6D3E": 1608553652000000000,
+    },
+    "cohort_b": {
+        "MRN885332B7": 1597153068000000000,
+        "MRN9D06E5D3": 1605016227000000000,
+    },
+}
 
 
-@pytest.mark.skipif(not KNOWN_MRNS, reason="KNOWN_MRNS list is empty — fill it in after running test_inspect_real_dataset")
+@pytest.mark.skipif(not MRN_COHORTS, reason="MRN_COHORTS is empty — fill it in to run this test")
 def test_mrn_cohort_real_data(sdk):
-    """1A: MRN cohort — supplied MRNs must come back in the resolved list."""
-    date_range = AdmissionDateRange(start=ADMIT_START_NS, end=ADMIT_END_NS)
+    """1A: MRN cohort — input MRNs are validated against AtriumDB and filtered
+    by admission window. Resolved sets are printed and validated against
+    EXPECTED_MRN_COHORTS and EXPECTED_MRN_ADMISSIONS where entries are filled in.
+    """
+    date_range = AdmissionDateRange(start=MRN_ADMIT_START_NS, end=MRN_ADMIT_END_NS)
     request = CohortDefinitionRequest(
         type="mrn",
         admission_date_range=date_range,
-        cohorts=[MrnCohort(id="real_mrn_cohort", mrn_list=KNOWN_MRNS)],
+        cohorts=[MrnCohort(id=cid, mrn_list=mrns) for cid, mrns in MRN_COHORTS],
     )
     result = sdk.dashboard_resolve_cohort(request, request_id="real-1a")
+    # by_id: cohort_id → list[PatientAdmission]
+    by_id: dict[str, list[PatientAdmission]] = {
+        c.id: c.patients for c in result.cohorts
+    }
 
-    resolved = set(result.cohorts[0].mrn_list)
-    print(f"\nResolved MRNs: {resolved}")
-    assert result.cohorts[0].id == "real_mrn_cohort"
-    assert len(resolved) > 0, (
-        "No MRNs resolved — check that the MRNs have encounters within "
-        f"[{ADMIT_START_NS}, {ADMIT_END_NS}]"
-    )
-    # Every resolved MRN must have been in the input list.
-    assert resolved.issubset(set(KNOWN_MRNS))
+    print(f"\n{'='*60}")
+    for cohort_id, patients in by_id.items():
+        print(f"  {cohort_id} ({len(patients)} resolved):")
+        for p in sorted(patients, key=lambda p: p.mrn):
+            print(f"    mrn={p.mrn}  admission_ns={p.admission_ns}")
+    print(f"{'='*60}")
+
+    # Resolved MRNs must be a subset of the input.
+    for cohort_id, patients in by_id.items():
+        resolved_mrns = {p.mrn for p in patients}
+        input_mrns = {mrn for cid, mrns in MRN_COHORTS if cid == cohort_id for mrn in mrns}
+        assert resolved_mrns.issubset(input_mrns), (
+            f"Cohort '{cohort_id}': resolved MRNs {resolved_mrns} contain values not in input {input_mrns}"
+        )
+
+    # Validate MRN sets where filled in.
+    for cohort_id, expected_mrns in EXPECTED_MRN_COHORTS.items():
+        if expected_mrns:
+            resolved_mrns = {p.mrn for p in by_id[cohort_id]}
+            assert resolved_mrns == expected_mrns, (
+                f"Cohort '{cohort_id}': expected MRNs {expected_mrns}, got {resolved_mrns}"
+            )
+
+    # Validate admission_ns per MRN where filled in.
+    for cohort_id, expected_admissions in EXPECTED_MRN_ADMISSIONS.items():
+        if expected_admissions:
+            resolved = {p.mrn: p.admission_ns for p in by_id[cohort_id]}
+            assert resolved == expected_admissions, (
+                f"Cohort '{cohort_id}': expected admissions {expected_admissions}, got {resolved}"
+            )
 
 
 # ---------------------------------------------------------------------------
 # Step 3 — demographic cohort (Priority 1B)
 #
-# The tests below use no filters beyond the date range, so they work against
-# any dataset.  Add sex / age / location filters once you know the real data.
+# Admission window: 2020-01-01 00:00:00 UTC → 2021-01-01 00:00:00 UTC.
+# Confirmed to contain a subset of encounters in the real dataset.
+#
+# Fill in the cohort definitions below as you explore the real data.
+# Each cohort exercises a different filter combination; add or remove cohorts
+# as needed. Expected MRN sets go in EXPECTED_DEMOGRAPHIC_COHORTS.
 # ---------------------------------------------------------------------------
 
-def test_demographic_cohort_no_filters(sdk):
-    """1B: demographic cohort with no filters returns all in-window patients."""
-    encounters = sdk.sql_handler.select_patient_encounters()
-    if not encounters:
-        pytest.skip("Dataset has no encounters — nothing to query.")
+DEMO_ADMIT_START_NS: int = 1577836800000000000  # 2020-01-01 00:00:00 UTC
+DEMO_ADMIT_END_NS:   int = 1609459200000000000  # 2021-01-01 00:00:00 UTC
 
-    start_times = [r[6] for r in encounters if r[6] is not None]
-    if not start_times:
-        pytest.skip("No encounter start times found.")
+ONE_YEAR_NS: int = 365 * 24 * 3600 * 1_000_000_000
 
-    # Build a window that covers every encounter in the dataset.
-    admit_start = min(start_times) - 1
-    admit_end = max(start_times) + 1
+# Maps cohort_id → expected set of MRNs.
+EXPECTED_DEMOGRAPHIC_COHORTS: dict[str, set[str]] = {
+    "male_age_10_15": {"MRN824A6D3E", "MRND62AADF3", "MRN79BFCA31"},
+}
 
-    date_range = AdmissionDateRange(start=admit_start, end=admit_end)
+# Maps cohort_id → {mrn: admission_ns}.
+# Fill in once you know the admission_ns values from the printed output below.
+# Only cohorts with entries here are validated on admission time.
+EXPECTED_DEMOGRAPHIC_ADMISSIONS: dict[str, dict[str, int]] = {
+    "male_age_10_15": {
+        "MRN824A6D3E": 1608553652000000000,
+        "MRND62AADF3": 1586531479000000000,
+        "MRN79BFCA31": 1597582892000000000,
+    },
+}
+
+DEMOGRAPHIC_COHORTS: list[DemographicCohort] = [
+    DemographicCohort(id="no_filters"),
+    DemographicCohort(id="male",   sex=["M"]),
+    DemographicCohort(id="female", sex=["F"]),
+    DemographicCohort(
+        id="male_age_10_15",
+        sex=["M"],
+        age=[AgeBand(start_ns=10 * ONE_YEAR_NS, end_ns=16 * ONE_YEAR_NS)],
+        location=["ICU"]
+    ),
+]
+
+
+def test_demographic_cohort_real_data(sdk):
+    """1B: demographic cohort — sex, age, location filters against real data.
+
+    Cohort definitions and expected results are configured via
+    DEMOGRAPHIC_COHORTS and EXPECTED_DEMOGRAPHIC_COHORTS at the top of this
+    section. Add cohorts and fill in expected sets as you explore the dataset.
+    """
+    date_range = AdmissionDateRange(start=DEMO_ADMIT_START_NS, end=DEMO_ADMIT_END_NS)
     request = CohortDefinitionRequest(
         type="demographic",
         admission_date_range=date_range,
-        cohorts=[DemographicCohort(id="all_patients")],
+        cohorts=DEMOGRAPHIC_COHORTS,
     )
-    result = sdk.dashboard_resolve_cohort(request, request_id="real-1b-all")
+    result = sdk.dashboard_resolve_cohort(request, request_id="real-1b")
+    # by_id: cohort_id → list[PatientAdmission]
+    by_id: dict[str, list[PatientAdmission]] = {
+        c.id: c.patients for c in result.cohorts
+    }
 
-    resolved = set(result.cohorts[0].mrn_list)
-    print(f"\nAll in-window MRNs ({len(resolved)}): {sorted(resolved)[:20]}")
-    assert len(resolved) > 0, "Expected at least one patient in the date window."
+    print(f"\n{'='*60}")
+    for cohort_id, patients in by_id.items():
+        print(f"  {cohort_id} ({len(patients)} patients):")
+        for p in sorted(patients, key=lambda p: p.mrn)[:10]:
+            print(f"    mrn={p.mrn}  admission_ns={p.admission_ns}")
+    print(f"{'='*60}")
 
+    no_filter_mrns = {p.mrn for p in by_id["no_filters"]}
+    assert len(no_filter_mrns) > 0, "Expected at least one patient in the 2020 window."
 
-def test_demographic_cohort_sex_filter(sdk):
-    """1B: sex filter — verify M and F cohorts partition the full result."""
-    encounters = sdk.sql_handler.select_patient_encounters()
-    if not encounters:
-        pytest.skip("Dataset has no encounters.")
-
-    start_times = [r[6] for r in encounters if r[6] is not None]
-    admit_start = min(start_times) - 1
-    admit_end = max(start_times) + 1
-    date_range = AdmissionDateRange(start=admit_start, end=admit_end)
-
-    request = CohortDefinitionRequest(
-        type="demographic",
-        admission_date_range=date_range,
-        cohorts=[
-            DemographicCohort(id="male",   sex=["M"]),
-            DemographicCohort(id="female", sex=["F"]),
-        ],
-    )
-    result = sdk.dashboard_resolve_cohort(request, request_id="real-1b-sex")
-    by_id = {c.id: set(c.mrn_list) for c in result.cohorts}
-
-    print(f"\n  male cohort   ({len(by_id['male'])}):   {sorted(by_id['male'])[:10]}")
-    print(f"  female cohort ({len(by_id['female'])}): {sorted(by_id['female'])[:10]}")
-
-    # M and F cohorts must not overlap.
-    overlap = by_id["male"] & by_id["female"]
+    # Male and female cohorts must not overlap.
+    male_mrns   = {p.mrn for p in by_id.get("male",   [])}
+    female_mrns = {p.mrn for p in by_id.get("female", [])}
+    overlap = male_mrns & female_mrns
     assert not overlap, f"Patients appear in both M and F cohorts: {overlap}"
+
+    # Validate MRN sets where filled in.
+    for cohort_id, expected_mrns in EXPECTED_DEMOGRAPHIC_COHORTS.items():
+        if expected_mrns:
+            resolved_mrns = {p.mrn for p in by_id[cohort_id]}
+            assert resolved_mrns == expected_mrns, (
+                f"Cohort '{cohort_id}': expected MRNs {expected_mrns}, got {resolved_mrns}"
+            )
+
+    # Validate admission_ns per MRN where filled in.
+    # Add entries to EXPECTED_DEMOGRAPHIC_ADMISSIONS (above) once you know the values.
+    for cohort_id, expected_admissions in EXPECTED_DEMOGRAPHIC_ADMISSIONS.items():
+        if expected_admissions:
+            resolved = {p.mrn: p.admission_ns for p in by_id[cohort_id]}
+            assert resolved == expected_admissions, (
+                f"Cohort '{cohort_id}': expected admissions {expected_admissions}, got {resolved}"
+            )

@@ -94,10 +94,10 @@ def _test_api_cohorts(db_type, dataset_location, connection_params):
     assert local_result.request_id == "test-1a-local"
     assert len(local_result.cohorts) == 1
     assert local_result.cohorts[0].id == "cohort_1a"
-    assert set(local_result.cohorts[0].mrn_list) == {"MRN001", "MRN002"}
+    assert {p.mrn for p in local_result.cohorts[0].patients} == {"MRN001", "MRN002"}
 
     api_result = api_sdk.dashboard_resolve_cohort(request_1a, request_id="test-1a-api")
-    assert set(api_result.cohorts[0].mrn_list) == {"MRN001", "MRN002"}
+    assert {p.mrn for p in api_result.cohorts[0].patients} == {"MRN001", "MRN002"}
 
     print("Testing 1B: demographic cohort — location filter...")
 
@@ -108,11 +108,11 @@ def _test_api_cohorts(db_type, dataset_location, connection_params):
     )
 
     # both in-window patients are in ICU; MRN003 is outside the window
-    local_result = sdk.dashboard_resolve_cohort(request_1b_loc)
-    assert set(local_result.cohorts[0].mrn_list) == {"MRN001", "MRN002"}
+    local_result = sdk.dashboard_resolve_cohort(request_1b_loc, request_id="test-1b-loc-local")
+    assert {p.mrn for p in local_result.cohorts[0].patients} == {"MRN001", "MRN002"}
 
-    api_result = api_sdk.dashboard_resolve_cohort(request_1b_loc)
-    assert set(api_result.cohorts[0].mrn_list) == {"MRN001", "MRN002"}
+    api_result = api_sdk.dashboard_resolve_cohort(request_1b_loc, request_id="test-1b-loc-api")
+    assert {p.mrn for p in api_result.cohorts[0].patients} == {"MRN001", "MRN002"}
 
     print("Testing 1B: demographic cohort — sex filter...")
 
@@ -122,11 +122,11 @@ def _test_api_cohorts(db_type, dataset_location, connection_params):
         cohorts=[DemographicCohort(id="cohort_1b_sex", location=["ICU"], sex=["M"])],
     )
 
-    local_result = sdk.dashboard_resolve_cohort(request_1b_sex)
-    assert set(local_result.cohorts[0].mrn_list) == {"MRN001"}
+    local_result = sdk.dashboard_resolve_cohort(request_1b_sex, request_id="test-1b-sex-local")
+    assert {p.mrn for p in local_result.cohorts[0].patients} == {"MRN001"}
 
-    api_result = api_sdk.dashboard_resolve_cohort(request_1b_sex)
-    assert set(api_result.cohorts[0].mrn_list) == {"MRN001"}
+    api_result = api_sdk.dashboard_resolve_cohort(request_1b_sex, request_id="test-1b-sex-api")
+    assert {p.mrn for p in api_result.cohorts[0].patients} == {"MRN001"}
 
     print("Testing 1B: demographic cohort — age filter...")
 
@@ -141,11 +141,11 @@ def _test_api_cohorts(db_type, dataset_location, connection_params):
         )],
     )
 
-    local_result = sdk.dashboard_resolve_cohort(request_1b_age)
-    assert set(local_result.cohorts[0].mrn_list) == {"MRN001"}
+    local_result = sdk.dashboard_resolve_cohort(request_1b_age, request_id="test-1b-age-local")
+    assert {p.mrn for p in local_result.cohorts[0].patients} == {"MRN001"}
 
-    api_result = api_sdk.dashboard_resolve_cohort(request_1b_age)
-    assert set(api_result.cohorts[0].mrn_list) == {"MRN001"}
+    api_result = api_sdk.dashboard_resolve_cohort(request_1b_age, request_id="test-1b-age-api")
+    assert {p.mrn for p in api_result.cohorts[0].patients} == {"MRN001"}
 
     print("Testing 1B: demographic cohort — multiple cohorts in one request...")
 
@@ -158,14 +158,14 @@ def _test_api_cohorts(db_type, dataset_location, connection_params):
         ],
     )
 
-    local_result = sdk.dashboard_resolve_cohort(request_multi)
+    local_result = sdk.dashboard_resolve_cohort(request_multi, request_id="test-1b-multi-local")
     assert len(local_result.cohorts) == 2
-    cohorts_by_id = {c.id: set(c.mrn_list) for c in local_result.cohorts}
+    cohorts_by_id = {c.id: {p.mrn for p in c.patients} for c in local_result.cohorts}
     assert cohorts_by_id["male_icu"] == {"MRN001"}
     assert cohorts_by_id["female_icu"] == {"MRN002"}
 
-    api_result = api_sdk.dashboard_resolve_cohort(request_multi)
-    cohorts_by_id = {c.id: set(c.mrn_list) for c in api_result.cohorts}
+    api_result = api_sdk.dashboard_resolve_cohort(request_multi, request_id="test-1b-multi-api")
+    cohorts_by_id = {c.id: {p.mrn for p in c.patients} for c in api_result.cohorts}
     assert cohorts_by_id["male_icu"] == {"MRN001"}
     assert cohorts_by_id["female_icu"] == {"MRN002"}
 
