@@ -75,7 +75,6 @@ class AggregateStatisticsRequest(BaseModel):
     measure:                MeasureIdentifier
     observation_window:     int                 # window length in epoch ns, e.g. 24 h = 86_400_000_000_000
     availability_threshold: float = 0.80        # fraction in [0, 1]
-    viz_type:               str   = "box"       # "box" or "violin"
 ```
 
 ### Response
@@ -327,9 +326,9 @@ if len(values) == 0:
     n_excluded += 1
     continue
 
-patient_mean   = float(np.mean(values))
-patient_median = float(np.median(values))
-patient_sd     = float(np.std(values, ddof=1)) if len(values) > 1 else None
+patient_mean = float(np.mean(values))
+# patient_median = float(np.median(values))
+# patient_sd     = float(np.std(values, ddof=1)) if len(values) > 1 else None
 
 included_means.append(patient_mean)
 ```
