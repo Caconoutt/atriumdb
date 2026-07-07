@@ -40,7 +40,7 @@ This document describes the implementation plan for computing per-cohort aggrega
 }
 ```
 
-`cohorts` contains one entry per cohort. Each `patient_results` entry is the per-patient mean of the signal over the observation window — raw enough to export and sufficient for the client to compute any statistics or render any plot (box, violin, etc.). All aggregation (mean, median, SD, quartiles, KDE) is left to the client.
+`cohorts` contains one entry per cohort. Each `patient_results` entry is the per-patient mean of the signal over the observation window — raw enough to export and sufficient for the client to compute any statistics or render any plot (box, violin, etc.). All aggregation (mean, median, SD, quartiles, KDE) is left to the client(dashboard server).
 
 ---
 
