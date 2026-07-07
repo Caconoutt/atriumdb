@@ -58,6 +58,8 @@ from atriumdb.windowing.random_access_iterator import MappedIterator
 from atriumdb.windowing.verify_definition import verify_definition
 from atriumdb.windowing.definition_splitter import partition_dataset
 from atriumdb.write_buffer import WriteBuffer
+from atriumdb.dashboard.schemas import MrnCohortResponse
+from atriumdb.dashboard.cohort_resolver import resolve_cohorts_local
 
 try:
     import requests
@@ -3169,9 +3171,9 @@ class AtriumSDK:
             :class:`~atriumdb.dashboard.schemas.CohortDefinitionRequest`
             instance describing the cohort type, the shared admission date
             range, and one or more cohort definitions.
-        :param request_id: Optional correlation ID attached to log messages
-            and echoed in the response ``requestId`` field. Corresponds to the
-            ``X-Request-ID`` header in the HTTP API.
+        :param request_id: Correlation ID attached to log messages and echoed
+            in the response ``requestId`` field. Corresponds to the
+            ``X-Request-ID`` header in the HTTP API. Must be a non-empty string.
         :type request_id: str
         :return: A
             :class:`~atriumdb.dashboard.schemas.MrnCohortResponse` containing
@@ -3179,9 +3181,14 @@ class AtriumSDK:
             response is confirmed to exist in AtriumDB and to have at least one
             admission record within the requested date range.
         :rtype: MrnCohortResponse
+        :raises ValueError: If ``request_id`` is ``None`` or an empty string.
         """
-        from atriumdb.dashboard.schemas import MrnCohortResponse
-        from atriumdb.dashboard.cohort_resolver import resolve_cohorts_local
+        if not request_id:
+            _LOGGER.error(
+                "dashboard_resolve_cohort called with missing or empty "
+                "request_id — every dashboard request must supply a non-empty request_id."
+            )
+            raise ValueError("request_id must be a non-empty string.")
 
         if self.metadata_connection_type == "api":
             raw = self._request(

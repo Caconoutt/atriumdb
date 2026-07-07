@@ -32,7 +32,9 @@ depending on the request type.
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from atriumdb.dashboard.encounter_queries import (
@@ -45,19 +47,20 @@ from atriumdb.dashboard.schemas import (
     DemographicCohort,
     MrnCohort,
     MrnCohortResponse,
+    PatientAdmission,
     ResolvedCohort,
 )
 
 if TYPE_CHECKING:
     from atriumdb import AtriumSDK
 
-logger = logging.getLogger(__name__)
+_LOGGER = logging.getLogger(__name__)
 
 
 def resolve_cohorts_local(
     sdk: "AtriumSDK",
     request: CohortDefinitionRequest,
-    request_id: str = "",
+    request_id: str,
 ) -> MrnCohortResponse:
     """Resolve all cohorts in a request using direct database access.
 
@@ -75,7 +78,8 @@ def resolve_cohorts_local(
     :param request: Parsed request body containing the cohort definitions and
         the shared ``admissionDateRange``.
     :param request_id: Value of the ``X-Request-ID`` header, echoed back in
-        the response and attached to log messages.
+        the response and attached to log messages. Caller guarantees this is a
+        non-empty string (validated by :meth:`~atriumdb.AtriumSDK.dashboard_resolve_cohort`).
     :return: :class:`~atriumdb.dashboard.schemas.MrnCohortResponse` with one
         resolved cohort per input cohort.
     """
@@ -83,17 +87,17 @@ def resolve_cohorts_local(
 
     if request.type == "mrn":
         for cohort in request.cohorts:
-            mrns = _resolve_mrn_cohort(
+            patients = _resolve_mrn_cohort(
                 sdk, cohort, request.admission_date_range, request_id
             )
-            resolved.append(ResolvedCohort(id=cohort.id, mrn_list=mrns))
+            resolved.append(ResolvedCohort(id=cohort.id, patients=patients))
 
     elif request.type == "demographic":
         for cohort in request.cohorts:
-            mrns = _resolve_demographic_cohort(
-                sdk, cohort, request.admission_date_range
+            patients = _resolve_demographic_cohort(
+                sdk, cohort, request.admission_date_range, request_id
             )
-            resolved.append(ResolvedCohort(id=cohort.id, mrn_list=mrns))
+            resolved.append(ResolvedCohort(id=cohort.id, patients=patients))
 
     return MrnCohortResponse(request_id=request_id, cohorts=resolved)
 
@@ -127,8 +131,9 @@ def _resolve_mrn_cohort(
         must have an encounter with ``start_time`` in ``[start, end]``.
     :param request_id: Attached to log messages to allow correlation across
         log lines for the same request.
-    :return: List of MRNs that passed both checks, in arbitrary order. May be
-        empty if no MRNs in the input passed.
+    :return: List of :class:`~atriumdb.dashboard.schemas.PatientAdmission` for
+        MRNs that passed both checks, in arbitrary order. May be empty if no
+        MRNs in the input passed.
     """
     # Step 0 — normalise (trim whitespace per Assumption §5)
     mrn_input = [m.strip() for m in cohort.mrn_list]
@@ -140,13 +145,10 @@ def _resolve_mrn_cohort(
     unrecognised = [m for m in mrn_input if m not in mrn_to_pid]
 
     if unrecognised:
-        logger.warning(
-            "MRNs not found in AtriumDB — excluded from cohort",
-            extra={
-                "request_id": request_id,
-                "cohort_id": cohort.id,
-                "mrns": unrecognised,
-            },
+        _LOGGER.warning(
+            "[%s] MRN Cohort Definition — MRNs not found in AtriumDB: %s",
+            request_id,
+            unrecognised,
         )
 
     if not recognised:
@@ -165,32 +167,40 @@ def _resolve_mrn_cohort(
     )
 
     visits = group_encounters_by_visit(encounter_rows)
-    patient_ids_with_admission = {pid for pid, _vn in visits}
+
+    # Earliest admit_time_ns per patient within the date range
+    patient_earliest_admission: dict[int, int] = {}
+    for (pid, _vn), visit in visits.items():
+        t = visit["admit_time_ns"]
+        if pid not in patient_earliest_admission or t < patient_earliest_admission[pid]:
+            patient_earliest_admission[pid] = t
+
     mrns_with_admission = {
-        patient_id_to_mrn[pid] for pid in patient_ids_with_admission
+        patient_id_to_mrn[pid] for pid in patient_earliest_admission
     }
 
     no_admission_in_range = [m for m in recognised if m not in mrns_with_admission]
     if no_admission_in_range:
-        logger.warning(
-            "MRNs exist in AtriumDB but have no encounter record in the "
-            "requested date range — excluded from cohort",
-            extra={
-                "request_id": request_id,
-                "cohort_id": cohort.id,
-                "mrns": no_admission_in_range,
-                "admit_start_ns": admission_date_range.start,
-                "admit_end_ns": admission_date_range.end,
-            },
+        _LOGGER.warning(
+            "[%s] MRN Cohort Definition — MRNs with no encounter in date range "
+            "[%s, %s]: %s",
+            request_id,
+            admission_date_range.start,
+            admission_date_range.end,
+            no_admission_in_range,
         )
 
-    return list(mrns_with_admission)
+    return [
+        PatientAdmission(mrn=patient_id_to_mrn[pid], admission_ns=admission_ns)
+        for pid, admission_ns in patient_earliest_admission.items()
+    ]
 
 
 def _resolve_demographic_cohort(
     sdk: "AtriumSDK",
     cohort: DemographicCohort,
     admission_date_range: AdmissionDateRange,
+    request_id: str = "",
 ) -> list[str]:
     """Resolve a demographic cohort filter to a validated MRN list (Priority 1B).
 
@@ -231,8 +241,9 @@ def _resolve_demographic_cohort(
     :param admission_date_range: Inclusive window (epoch nanoseconds) used
         both to scope the encounter candidate pool and to anchor each
         patient's age-at-admission calculation.
-    :return: List of MRNs that passed all active filters, in arbitrary order.
-        May be empty if no patients matched.
+    :return: List of :class:`~atriumdb.dashboard.schemas.PatientAdmission` for
+        patients that passed all active filters, in arbitrary order. May be
+        empty if no patients matched.
     """
     # Stage 1 — location + date filter
     encounter_rows = query_patient_encounters(
@@ -268,7 +279,7 @@ def _resolve_demographic_cohort(
     }
 
     # Stage 3 — age and sex filters (pure Python)
-    surviving_mrns: list[str] = []
+    surviving_patients: list[PatientAdmission] = []
 
     for pid, visit in reference_admission.items():
         demo = demographics.get(pid, {})
@@ -300,6 +311,8 @@ def _resolve_demographic_cohort(
                 sex_ok = g in requested or (g == "U" and "U" in requested)
 
         if age_ok and sex_ok and mrn is not None:
-            surviving_mrns.append(mrn)
+            surviving_patients.append(
+                PatientAdmission(mrn=str(mrn), admission_ns=admit_time_ns)
+            )
 
-    return surviving_mrns
+    return surviving_patients

@@ -43,6 +43,19 @@ class AdmissionDateRange(_Base):
     end: int
 
 
+class PatientAdmission(_Base):
+    """A single patient in a resolved cohort, with their verified admission anchor.
+
+    :param mrn: The patient's medical record number.
+    :param admission_ns: The earliest qualifying encounter ``start_time`` in
+        Unix epoch nanoseconds. Already verified to fall within the request's
+        ``admission_date_range`` — no further range check is needed downstream.
+    """
+
+    mrn: str
+    admission_ns: int
+
+
 class AgeBand(_Base):
     """A single age band expressed in nanoseconds.
 
@@ -124,13 +137,14 @@ class ResolvedCohort(_Base):
     """A single resolved cohort in the response.
 
     :param id: The cohort identifier echoed from the request.
-    :param mrn_list: Validated MRNs that passed all filters. Every MRN here is
-        confirmed to exist in AtriumDB and have an admission in the requested
-        date range.
+    :param patients: Validated patients that passed all filters. Every entry is
+        confirmed to exist in AtriumDB, have an admission within the requested
+        date range, and carries the earliest qualifying ``admission_ns`` as the
+        anchor for downstream observation window calculations.
     """
 
     id: str
-    mrn_list: list[str]
+    patients: list[PatientAdmission]
 
 
 class MrnCohortResponse(_Base):

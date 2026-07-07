@@ -41,7 +41,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from atriumdb import AtriumSDK
 
-logger = logging.getLogger(__name__)
+_LOGGER = logging.getLogger(__name__)
 
 # Maps API location codes to the exact strings stored in unit.name.
 # Filtering is performed against unit.name (not unit.type).
@@ -168,7 +168,7 @@ def group_encounters_by_visit(
         key = (pid, vn)
 
         if vn is None:
-            logger.warning(
+            _LOGGER.warning(
                 "Encountered NULL visit_number for patient_id=%s "
                 "(encounter_id=%s) — indicates incomplete data.",
                 pid,
