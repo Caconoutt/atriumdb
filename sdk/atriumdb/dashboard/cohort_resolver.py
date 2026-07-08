@@ -132,8 +132,9 @@ def _resolve_mrn_cohort(
     :param request_id: Attached to log messages to allow correlation across
         log lines for the same request.
     :return: List of :class:`~atriumdb.dashboard.schemas.PatientAdmission` for
-        MRNs that passed both checks, in arbitrary order. May be empty if no
-        MRNs in the input passed.
+        MRNs that passed both checks. Each entry contains all qualifying
+        admission timestamps (sorted ascending) for that patient within the
+        date range. May be empty if no MRNs in the input passed.
     """
     # Step 0 — normalise (trim whitespace per Assumption §5)
     mrn_input = [m.strip() for m in cohort.mrn_list]
@@ -168,15 +169,13 @@ def _resolve_mrn_cohort(
 
     visits = group_encounters_by_visit(encounter_rows)
 
-    # Earliest admit_time_ns per patient within the date range
-    patient_earliest_admission: dict[int, int] = {}
+    # Collect all qualifying admission times per patient (one per distinct visit)
+    patient_admissions: dict[int, list[int]] = {}
     for (pid, _vn), visit in visits.items():
-        t = visit["admit_time_ns"]
-        if pid not in patient_earliest_admission or t < patient_earliest_admission[pid]:
-            patient_earliest_admission[pid] = t
+        patient_admissions.setdefault(pid, []).append(visit["admit_time_ns"])
 
     mrns_with_admission = {
-        patient_id_to_mrn[pid] for pid in patient_earliest_admission
+        patient_id_to_mrn[pid] for pid in patient_admissions
     }
 
     no_admission_in_range = [m for m in recognised if m not in mrns_with_admission]
@@ -191,8 +190,8 @@ def _resolve_mrn_cohort(
         )
 
     return [
-        PatientAdmission(mrn=patient_id_to_mrn[pid], admission_ns=admission_ns)
-        for pid, admission_ns in patient_earliest_admission.items()
+        PatientAdmission(mrn=patient_id_to_mrn[pid], admissions=sorted(times))
+        for pid, times in patient_admissions.items()
     ]
 
 
@@ -208,13 +207,10 @@ def _resolve_demographic_cohort(
 
     **Stage 1 — Location + date filter (SQL)**
         Calls :func:`~atriumdb.dashboard.encounter_queries.query_patient_encounters`
-        with ``locations`` and ``admissionDateRange``. This constrains
-        candidates to patients who were admitted to the specified unit type
-        *during* the date range of interest — not patients who were ever
-        admitted there. Then collapses rows to per-visit records via
-        :func:`~atriumdb.dashboard.encounter_queries.group_encounters_by_visit` and
-        selects each patient's **reference admission**: the earliest in-range
-        visit per design doc Assumption §4.
+        with ``locations`` and ``admissionDateRange``. Collapses rows to
+        per-visit records via
+        :func:`~atriumdb.dashboard.encounter_queries.group_encounters_by_visit`.
+        All qualifying visits per patient are retained — not just the earliest.
 
     **Stage 2 — Demographics fetch (SQL)**
         Calls ``sdk.sql_handler.select_all_patients_in_list`` with the
@@ -222,15 +218,16 @@ def _resolve_demographic_cohort(
         ...)`` tuples (column order from ``maria_handler.py:703``).
 
     **Stage 3 — Age and sex filters (Python)**
-        Age is evaluated at each patient's reference ``admit_time_ns`` from
-        Stage 1 (not the current date)::
+        Sex is a patient-level filter applied once per patient. Age is
+        evaluated per visit at each visit's ``admit_time_ns`` (not the current
+        date)::
 
             age_at_admission_ns = admit_time_ns - dob_ns
 
-        Age bounds arrive as nanoseconds pre-converted by the dashboard server.
-        Patients with ``dob = None`` are excluded when an age filter is
-        supplied. Sex ``"U"`` matches NULL, empty, or the literal ``'U'``
-        stored in ``patient.gender``.
+        Only visits where the age filter passes are included in the patient's
+        ``admissions`` list. Patients with ``dob = None`` are excluded from
+        all visits when an age filter is supplied. Sex ``"U"`` matches NULL,
+        empty, or the literal ``'U'`` stored in ``patient.gender``.
 
     All active filters are AND-ed; within each filter the individual values
     are OR-ed (e.g. ``sex=["F","U"]`` keeps female *or* unknown patients).
@@ -240,10 +237,11 @@ def _resolve_demographic_cohort(
         containing ``age``, ``sex``, and ``location`` filters.
     :param admission_date_range: Inclusive window (epoch nanoseconds) used
         both to scope the encounter candidate pool and to anchor each
-        patient's age-at-admission calculation.
+        visit's age-at-admission calculation.
     :return: List of :class:`~atriumdb.dashboard.schemas.PatientAdmission` for
-        patients that passed all active filters, in arbitrary order. May be
-        empty if no patients matched.
+        patients that passed all active filters. Each entry contains all
+        qualifying visit admission timestamps (sorted ascending). May be empty
+        if no patients matched.
     """
     # Stage 1 — location + date filter
     encounter_rows = query_patient_encounters(
@@ -255,20 +253,17 @@ def _resolve_demographic_cohort(
 
     visits = group_encounters_by_visit(encounter_rows)
 
-    # Reference admission = earliest admit_time_ns per patient
-    reference_admission: dict[int, dict] = {}
+    # Collect all visits per patient — each (pid, visit_number) is a distinct admission
+    patient_visits: dict[int, list[dict]] = {}
     for (pid, _vn), visit in visits.items():
-        if pid not in reference_admission or (
-            visit["admit_time_ns"] < reference_admission[pid]["admit_time_ns"]
-        ):
-            reference_admission[pid] = visit
+        patient_visits.setdefault(pid, []).append(visit)
 
-    if not reference_admission:
+    if not patient_visits:
         return []
 
     # Stage 2 — fetch demographics for the candidate patient set
     patient_rows = sdk.sql_handler.select_all_patients_in_list(
-        patient_id_list=list(reference_admission.keys())
+        patient_id_list=list(patient_visits.keys())
     )
     # Column order from maria_handler.py:703:
     # id, mrn, gender, dob, first_name, middle_name, last_name,
@@ -278,28 +273,20 @@ def _resolve_demographic_cohort(
         for row in patient_rows
     }
 
-    # Stage 3 — age and sex filters (pure Python)
+    # Stage 3 — sex filter at patient level; age filter per visit
+    # A patient is included if they pass sex and have at least one visit that
+    # passes the age filter. All qualifying visit admissions are returned.
     surviving_patients: list[PatientAdmission] = []
 
-    for pid, visit in reference_admission.items():
+    for pid, visit_list in patient_visits.items():
         demo = demographics.get(pid, {})
         mrn = demo.get("mrn")
         dob_ns = demo.get("dob_ns")
-        admit_time_ns = visit["admit_time_ns"]
 
-        # Age filter: evaluated at admit_time_ns, not the current date
-        age_ok = True
-        if cohort.age:
-            if dob_ns is None:
-                age_ok = False  # unknown dob — cannot verify age
-            else:
-                age_at_admission_ns = admit_time_ns - dob_ns
-                age_ok = any(
-                    band.start_ns <= age_at_admission_ns <= band.end_ns
-                    for band in cohort.age
-                )
+        if mrn is None:
+            continue
 
-        # Sex filter: "U" matches NULL / empty / literal 'U'
+        # Sex filter: patient-level, not visit-level
         sex_ok = True
         if cohort.sex:
             requested = {s.upper() for s in cohort.sex}
@@ -310,9 +297,29 @@ def _resolve_demographic_cohort(
                 g = gender_raw.strip().upper()
                 sex_ok = g in requested or (g == "U" and "U" in requested)
 
-        if age_ok and sex_ok and mrn is not None:
+        if not sex_ok:
+            continue
+
+        # Age filter: evaluated per visit at each admit_time_ns
+        qualifying_admissions: list[int] = []
+        for visit in visit_list:
+            admit_time_ns = visit["admit_time_ns"]
+            age_ok = True
+            if cohort.age:
+                if dob_ns is None:
+                    age_ok = False  # unknown dob — cannot verify age
+                else:
+                    age_at_admission_ns = admit_time_ns - dob_ns
+                    age_ok = any(
+                        band.start_ns <= age_at_admission_ns <= band.end_ns
+                        for band in cohort.age
+                    )
+            if age_ok:
+                qualifying_admissions.append(admit_time_ns)
+
+        if qualifying_admissions:
             surviving_patients.append(
-                PatientAdmission(mrn=str(mrn), admission_ns=admit_time_ns)
+                PatientAdmission(mrn=str(mrn), admissions=sorted(qualifying_admissions))
             )
 
     return surviving_patients

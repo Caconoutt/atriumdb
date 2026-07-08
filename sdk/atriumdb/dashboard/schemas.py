@@ -44,16 +44,17 @@ class AdmissionDateRange(_Base):
 
 
 class PatientAdmission(_Base):
-    """A single patient in a resolved cohort, with their verified admission anchor.
+    """A single patient in a resolved cohort with all their qualifying admissions.
 
     :param mrn: The patient's medical record number.
-    :param admission_ns: The earliest qualifying encounter ``start_time`` in
-        Unix epoch nanoseconds. Already verified to fall within the request's
-        ``admission_date_range`` — no further range check is needed downstream.
+    :param admissions: All qualifying encounter start times in Unix epoch
+        nanoseconds, sorted ascending. Each entry corresponds to a distinct
+        visit within the request's ``admission_date_range``. A patient with
+        multiple in-range visits will have multiple entries here.
     """
 
     mrn: str
-    admission_ns: int
+    admissions: list[int]
 
 
 class AgeBand(_Base):
