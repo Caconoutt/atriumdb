@@ -67,8 +67,8 @@ class MeasureIdentifier(_Base):
 
     measure_tag: str
     freq: float
-    units: str
-    freq_units: str
+    units: str | None = None
+    freq_units: str | None = None
 
 
 class CohortInput(_Base):

@@ -178,6 +178,7 @@ def _process_cohort(
                 patient_id=patient_id,
             )
             if device_id is None:
+                # print(f"[DEBUG] mrn={mrn}  admission_ns={admission_ns}  -> EXCLUDED: no_device_found")
                 exclusions.append(_make_exclusion(
                     request_id=request_id,
                     cohort_id=cohort_id,
@@ -206,6 +207,7 @@ def _process_cohort(
             availability = covered_ns / observation_window_ns
 
             if availability < request.availability_threshold:
+                # print(f"[DEBUG] mrn={mrn}  admission_ns={admission_ns}  device_id={device_id}  availability={availability:.3f}  -> EXCLUDED: below_availability_threshold")
                 exclusions.append(_make_exclusion(
                     request_id=request_id,
                     cohort_id=cohort_id,
@@ -311,6 +313,7 @@ def _extract_patient_mean(
         start_time_n=window_start_ns,
         end_time_n=window_end_ns,
     )
+    # print(f"[DEBUG _extract_patient_mean] mrn={mrn}  measure_id={measure_id}  device_id={device_id}  patient_id={patient_id}  start={window_start_ns}  end={window_end_ns}  values={values} \n")
 
     if values is None:
         values = np.array([])
