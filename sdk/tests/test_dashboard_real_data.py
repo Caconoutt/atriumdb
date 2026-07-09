@@ -124,18 +124,18 @@ EXPECTED_MRN_COHORTS: dict[str, set[str]] = {
     "cohort_b": {"MRN885332B7", "MRN9D06E5D3"},
 }
 
-# Maps cohort_id → {mrn: admission_ns}.
-# Fill in once you know the admission_ns values from the printed output below.
+# Maps cohort_id → {mrn: admissions}.
+# Fill in once you know the admissions values from the printed output below.
 # Only cohorts with entries here are validated on admission time.
-EXPECTED_MRN_ADMISSIONS: dict[str, dict[str, int]] = {
+EXPECTED_MRN_ADMISSIONS: dict[str, dict[str, list[int]]] = {
     "cohort_a": {
-        "MRN3E7DB077": 1584420294000000000,
-        "MRN3279EDCF": 1602609105000000000,
-        "MRN824A6D3E": 1608553652000000000,
+        "MRN3E7DB077": [1584420294000000000],
+        "MRN3279EDCF": [1602609105000000000],
+        "MRN824A6D3E": [1608553652000000000],
     },
     "cohort_b": {
-        "MRN885332B7": 1597153068000000000,
-        "MRN9D06E5D3": 1605016227000000000,
+        "MRN885332B7": [1597153068000000000],
+        "MRN9D06E5D3": [1605016227000000000],
     },
 }
 
@@ -162,7 +162,7 @@ def test_mrn_cohort_real_data(sdk):
     for cohort_id, patients in by_id.items():
         print(f"  {cohort_id} ({len(patients)} resolved):")
         for p in sorted(patients, key=lambda p: p.mrn):
-            print(f"    mrn={p.mrn}  admission_ns={p.admission_ns}")
+            print(f"    mrn={p.mrn}  admissions={p.admissions}")
     print(f"{'='*60}")
 
     # Resolved MRNs must be a subset of the input.
@@ -181,10 +181,10 @@ def test_mrn_cohort_real_data(sdk):
                 f"Cohort '{cohort_id}': expected MRNs {expected_mrns}, got {resolved_mrns}"
             )
 
-    # Validate admission_ns per MRN where filled in.
+    # Validate admissions per MRN where filled in.
     for cohort_id, expected_admissions in EXPECTED_MRN_ADMISSIONS.items():
         if expected_admissions:
-            resolved = {p.mrn: p.admission_ns for p in by_id[cohort_id]}
+            resolved = {p.mrn: p.admissions for p in by_id[cohort_id]}
             assert resolved == expected_admissions, (
                 f"Cohort '{cohort_id}': expected admissions {expected_admissions}, got {resolved}"
             )
@@ -205,20 +205,32 @@ DEMO_ADMIT_START_NS: int = 1577836800000000000  # 2020-01-01 00:00:00 UTC
 DEMO_ADMIT_END_NS:   int = 1609459200000000000  # 2021-01-01 00:00:00 UTC
 
 ONE_YEAR_NS: int = 365 * 24 * 3600 * 1_000_000_000
+ONE_MONTH_NS: int = 30 * 24 * 3600 * 1_000_000_000
 
 # Maps cohort_id → expected set of MRNs.
 EXPECTED_DEMOGRAPHIC_COHORTS: dict[str, set[str]] = {
-    "male_age_10_15": {"MRN824A6D3E", "MRND62AADF3", "MRN79BFCA31"},
+    "male_age_10_0_15_0": {"MRN824A6D3E", "MRND62AADF3", "MRN79BFCA31"},
+    "female_age_10_3_15_10": {"MRN63163B57", "MRN44A9FE95"},
+    "female_age_2_5_7_11": {"MRN3E7DB077", "MRNAA5C025D","MRN376EFBF4"}
 }
 
-# Maps cohort_id → {mrn: admission_ns}.
-# Fill in once you know the admission_ns values from the printed output below.
+# Maps cohort_id → {mrn: admissions}.
+# Fill in once you know the admissions values from the printed output below.
 # Only cohorts with entries here are validated on admission time.
-EXPECTED_DEMOGRAPHIC_ADMISSIONS: dict[str, dict[str, int]] = {
-    "male_age_10_15": {
-        "MRN824A6D3E": 1608553652000000000,
-        "MRND62AADF3": 1586531479000000000,
-        "MRN79BFCA31": 1597582892000000000,
+EXPECTED_DEMOGRAPHIC_ADMISSIONS: dict[str, dict[str, list[int]]] = {
+    "male_age_10_0_15_0": {
+        "MRN824A6D3E": [1608553652000000000],
+        "MRND62AADF3": [1586531479000000000],
+        "MRN79BFCA31": [1597582892000000000],
+    },
+    "female_age_10_3_15_10": {
+        "MRN63163B57": [1591514059000000000],
+        "MRN44A9FE95": [1586164554000000000],
+    },
+    "female_age_2_5_7_11": {
+        "MRN3E7DB077": [1584420294000000000],
+        "MRNAA5C025D": [1587313853000000000],
+        "MRN376EFBF4": [1587319600000000000],
     },
 }
 
@@ -227,9 +239,21 @@ DEMOGRAPHIC_COHORTS: list[DemographicCohort] = [
     DemographicCohort(id="male",   sex=["M"]),
     DemographicCohort(id="female", sex=["F"]),
     DemographicCohort(
-        id="male_age_10_15",
+        id="male_age_10_0_15_0",
         sex=["M"],
-        age=[AgeBand(start_ns=10 * ONE_YEAR_NS, end_ns=16 * ONE_YEAR_NS)],
+        age=[AgeBand(start_ns=10 * ONE_YEAR_NS + 0 * ONE_MONTH_NS, end_ns=15 * ONE_YEAR_NS + 0 * ONE_MONTH_NS)],
+        location=["ICU"]
+    ),
+    DemographicCohort(
+        id="female_age_10_3_15_10",
+        sex=["F"],
+        age=[AgeBand(start_ns=10 * ONE_YEAR_NS + 3 * ONE_MONTH_NS, end_ns=15 * ONE_YEAR_NS + 10 * ONE_MONTH_NS)],
+        location=["ICU"]
+    ),
+    DemographicCohort(
+        id="female_age_2_5_7_11",
+        sex=["F"],
+        age=[AgeBand(start_ns=2 * ONE_YEAR_NS + 5 * ONE_MONTH_NS, end_ns=7 * ONE_YEAR_NS + 11 * ONE_MONTH_NS)],
         location=["ICU"]
     ),
 ]
@@ -258,7 +282,7 @@ def test_demographic_cohort_real_data(sdk):
     for cohort_id, patients in by_id.items():
         print(f"  {cohort_id} ({len(patients)} patients):")
         for p in sorted(patients, key=lambda p: p.mrn)[:10]:
-            print(f"    mrn={p.mrn}  admission_ns={p.admission_ns}")
+            print(f"    mrn={p.mrn}  admissions={p.admissions}")
     print(f"{'='*60}")
 
     no_filter_mrns = {p.mrn for p in by_id["no_filters"]}
@@ -278,11 +302,11 @@ def test_demographic_cohort_real_data(sdk):
                 f"Cohort '{cohort_id}': expected MRNs {expected_mrns}, got {resolved_mrns}"
             )
 
-    # Validate admission_ns per MRN where filled in.
+    # Validate admissions per MRN where filled in.
     # Add entries to EXPECTED_DEMOGRAPHIC_ADMISSIONS (above) once you know the values.
     for cohort_id, expected_admissions in EXPECTED_DEMOGRAPHIC_ADMISSIONS.items():
         if expected_admissions:
-            resolved = {p.mrn: p.admission_ns for p in by_id[cohort_id]}
+            resolved = {p.mrn: p.admissions for p in by_id[cohort_id]}
             assert resolved == expected_admissions, (
                 f"Cohort '{cohort_id}': expected admissions {expected_admissions}, got {resolved}"
             )

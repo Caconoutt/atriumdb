@@ -59,7 +59,7 @@ exec docker run --rm -it \
 # conn = sqlite3.connect('/data/atriumdb/meta/index.db')
 
 # rows = conn.execute('''
-#     SELECT p.mrn, e.start_time
+#     SELECT p.mrn, p.id, e.start_time, e.start_time - p.dob
 #     FROM encounter e
 #     JOIN patient p ON e.patient_id = p.id
 #     WHERE e.start_time >= 1577836800000000000
@@ -76,8 +76,9 @@ exec docker run --rm -it \
 
 # # Age bounds in epoch nanoseconds (adjust years as needed)
 # ONE_YEAR_NS = 365 * 24 * 3600 * 1_000_000_000
-# age_min_ns = 10 * ONE_YEAR_NS
-# age_max_ns = 15 * ONE_YEAR_NS
+# ONE_MONTH_NS: int = 30 * 24 * 3600 * 1_000_000_000
+# age_min_ns = 2 * ONE_YEAR_NS + 5 * ONE_MONTH_NS
+# age_max_ns = 7 * ONE_YEAR_NS + 11 * ONE_MONTH_NS
 
 # rows = conn.execute('''
 #     SELECT p.*, e.start_time
@@ -89,7 +90,7 @@ exec docker run --rm -it \
 #       AND p.dob IS NOT NULL
 #       AND (e.start_time - p.dob) >= ?
 #       AND (e.start_time - p.dob) <= ?
-# ''', ('M', age_min_ns, age_max_ns)).fetchall()
+# ''', ('F', age_min_ns, age_max_ns)).fetchall()
 # print('row count:', len(rows))
 # for r in rows:
 #     print(r)
