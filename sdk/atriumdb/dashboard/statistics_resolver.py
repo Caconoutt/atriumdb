@@ -15,7 +15,7 @@
 #     You should have received a copy of the GNU General Public License
 #     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""Per-cohort aggregate statistics computation (Priority S2).
+"""Per-cohort aggregate statistics computation.
 
 Entry point: :func:`compute_aggregate_statistics`.
 
@@ -43,6 +43,8 @@ from atriumdb.dashboard.schemas import (
     AggregateStatisticsResponse,
     CohortInput,
     CohortStatistics,
+    ExclusionReason,
+    ExclusionRecord,
     PatientResult,
 )
 
@@ -135,105 +137,127 @@ def _process_cohort(
 ) -> CohortStatistics:
     """Process one cohort through the full pipeline and return its statistics."""
     cohort_id = cohort.id
-    n_excluded = 0
     patient_results: list[PatientResult] = []
+    exclusions: list[ExclusionRecord] = []
 
     # Step 3a — resolve MRN → patient_id
-    mrn_to_pid = _resolve_patient_ids(sdk, cohort, request_id)
-    n_candidates = len(mrn_to_pid)
+    mrn_to_pid = _resolve_patient_ids(sdk, cohort, request_id, exclusions)
+    n_patients = len(mrn_to_pid)
 
-    _LOGGER.debug(
-        "[%s] Cohort %s: %d/%d MRNs resolved to patient IDs.",
-        request_id, cohort_id, n_candidates, len(cohort.patients),
+    # Each (patient, admission) pair is one entry in the pipeline.
+    n_visits = sum(
+        len(p.admissions) for p in cohort.patients if p.mrn in mrn_to_pid
     )
 
-    for mrn, patient_id in mrn_to_pid.items():
-        admission_ns = next(
-            p.admission_ns for p in cohort.patients if p.mrn == mrn
-        )
-
-        # Step 3b — observation window
-        window_start_ns = admission_ns
-        window_end_ns = admission_ns + request.observation_window
-
-        # Step 3c — device resolution
-        device_id = sdk.convert_patient_to_device_id(
-            start_time=window_start_ns,
-            end_time=window_end_ns,
-            patient_id=patient_id,
-        )
-        if device_id is None:
-            _log_exclusion(
-                request_id=request_id,
-                cohort_id=cohort_id,
-                mrn=mrn,
-                patient_id=patient_id,
-                reason="no_device_found",
-                window=(window_start_ns, window_end_ns),
-            )
-            n_excluded += 1
-            continue
-
-        # Step 3d — availability check
-        interval_arr = sdk.get_interval_array(
-            measure_id=measure_id,
-            device_id=device_id,
-            patient_id=patient_id,
-            start=window_start_ns,
-            end=window_end_ns,
-        )
-
-        if interval_arr is None or len(interval_arr) == 0:
-            covered_ns = 0
-        else:
-            covered_ns = int(np.sum(interval_arr[:, 1] - interval_arr[:, 0]))
-
-        observation_window_ns = window_end_ns - window_start_ns
-        availability = covered_ns / observation_window_ns
-
-        if availability < request.availability_threshold:
-            _log_exclusion(
-                request_id=request_id,
-                cohort_id=cohort_id,
-                mrn=mrn,
-                patient_id=patient_id,
-                reason="below_availability_threshold",
-                window=(window_start_ns, window_end_ns),
-                availability=availability,
-                threshold=request.availability_threshold,
-            )
-            n_excluded += 1
-            continue
-
-        # Step 4 — value extraction and per-patient mean
-        result = _extract_patient_mean(
-            sdk=sdk,
-            measure_id=measure_id,
-            device_id=device_id,
-            patient_id=patient_id,
-            mrn=mrn,
-            cohort_id=cohort_id,
-            request_id=request_id,
-            window_start_ns=window_start_ns,
-            window_end_ns=window_end_ns,
-        )
-        if result is None:
-            n_excluded += 1
-            continue
-
-        patient_results.append(PatientResult(mrn=mrn, mean=result))
-
     _LOGGER.debug(
-        "[%s] Cohort %s: %d included, %d excluded of %d candidates.",
-        request_id, cohort_id, len(patient_results), n_excluded, n_candidates,
+        "[%s] Cohort %s: %d/%d MRNs resolved → %d admission entries to process.",
+        request_id, cohort_id, n_patients, len(cohort.patients), n_visits,
+    )
+
+    for patient in cohort.patients:
+        mrn = patient.mrn
+        patient_id = mrn_to_pid.get(mrn)
+        if patient_id is None:
+            continue
+
+        if len(patient.admissions) > 1:
+            _LOGGER.debug(
+                "[%s] Cohort %s: mrn=%s has %d admissions — each processed as a distinct entry.",
+                request_id, cohort_id, mrn, len(patient.admissions),
+            )
+
+        for admission_ns in patient.admissions:
+            # Step 3b — observation window anchored at this admission
+            window_start_ns = admission_ns
+            window_end_ns = admission_ns + request.observation_window
+
+            # Step 3c — device resolution
+            device_id = sdk.convert_patient_to_device_id(
+                start_time=window_start_ns,
+                end_time=window_end_ns,
+                patient_id=patient_id,
+            )
+            if device_id is None:
+                exclusions.append(_make_exclusion(
+                    request_id=request_id,
+                    cohort_id=cohort_id,
+                    mrn=mrn,
+                    reason=ExclusionReason.NO_DEVICE_FOUND,
+                    admission_ns=admission_ns,
+                    window=(window_start_ns, window_end_ns),
+                ))
+                continue
+
+            # Step 3d — availability check
+            interval_arr = sdk.get_interval_array(
+                measure_id=measure_id,
+                device_id=device_id,
+                patient_id=patient_id,
+                start=window_start_ns,
+                end=window_end_ns,
+            )
+
+            if interval_arr is None or len(interval_arr) == 0:
+                covered_ns = 0
+            else:
+                covered_ns = int(np.sum(interval_arr[:, 1] - interval_arr[:, 0]))
+
+            observation_window_ns = window_end_ns - window_start_ns
+            availability = covered_ns / observation_window_ns
+
+            if availability < request.availability_threshold:
+                exclusions.append(_make_exclusion(
+                    request_id=request_id,
+                    cohort_id=cohort_id,
+                    mrn=mrn,
+                    reason=ExclusionReason.BELOW_AVAILABILITY_THRESHOLD,
+                    admission_ns=admission_ns,
+                    window=(window_start_ns, window_end_ns),
+                    availability=availability,
+                ))
+                continue
+
+            # Step 4 — value extraction and per-entry mean
+            result = _extract_patient_mean(
+                sdk=sdk,
+                measure_id=measure_id,
+                device_id=device_id,
+                patient_id=patient_id,
+                mrn=mrn,
+                cohort_id=cohort_id,
+                request_id=request_id,
+                window_start_ns=window_start_ns,
+                window_end_ns=window_end_ns,
+            )
+            if result is None:
+                exclusions.append(_make_exclusion(
+                    request_id=request_id,
+                    cohort_id=cohort_id,
+                    mrn=mrn,
+                    reason=ExclusionReason.NO_USABLE_VALUES,
+                    admission_ns=admission_ns,
+                    window=(window_start_ns, window_end_ns),
+                ))
+                continue
+
+            patient_results.append(
+                PatientResult(mrn=mrn, admission_ns=admission_ns, mean=result)
+            )
+
+    n_excluded = len(exclusions)
+    _LOGGER.debug(
+        "[%s] Cohort %s: %d included, %d excluded of %d entries (%d distinct patients).",
+        request_id, cohort_id, len(patient_results), n_excluded, n_visits, n_patients,
     )
 
     return CohortStatistics(
         cohort_id=cohort_id,
-        n_candidates=n_candidates,
+        n_patients=n_patients,
+        n_visits=n_visits,
         n_included=len(patient_results),
         n_excluded=n_excluded,
         patient_results=patient_results,
+        exclusions=exclusions,
     )
 
 
@@ -245,20 +269,20 @@ def _resolve_patient_ids(
     sdk: "AtriumSDK",
     cohort: CohortInput,
     request_id: str,
+    exclusions: list[ExclusionRecord],
 ) -> dict[str, int]:
-    """Return {mrn: patient_id} for MRNs that resolve; log and skip the rest."""
+    """Return {mrn: patient_id} for MRNs that resolve; append exclusions for the rest."""
     result: dict[str, int] = {}
     for patient in cohort.patients:
         mrn = patient.mrn
         patient_id = sdk.get_patient_id(mrn=mrn)
         if patient_id is None:
-            _log_exclusion(
+            exclusions.append(_make_exclusion(
                 request_id=request_id,
                 cohort_id=cohort.id,
                 mrn=mrn,
-                patient_id=None,
-                reason="mrn_not_found",
-            )
+                reason=ExclusionReason.MRN_NOT_FOUND,
+            ))
             continue
         result[mrn] = patient_id
     return result
@@ -294,45 +318,44 @@ def _extract_patient_mean(
     values = values[~np.isnan(values)]
 
     if len(values) == 0:
-        _log_exclusion(
-            request_id=request_id,
-            cohort_id=cohort_id,
-            mrn=mrn,
-            patient_id=patient_id,
-            reason="empty_values_after_nan_drop",
-            window=(window_start_ns, window_end_ns),
-        )
         return None
 
     return float(np.mean(values))
 
 
 # ---------------------------------------------------------------------------
-# Exclusion logging
+# Exclusion record construction + logging
 # ---------------------------------------------------------------------------
 
-def _log_exclusion(
+def _make_exclusion(
     request_id: str,
     cohort_id: int,
     mrn: str,
-    patient_id: int | None,
-    reason: str,
+    reason: ExclusionReason,
+    admission_ns: int | None = None,
     window: tuple[int, int] | None = None,
     availability: float | None = None,
-    threshold: float | None = None,
-) -> None:
-    """Write a structured exclusion record to the exclusions logger."""
+) -> ExclusionRecord:
+    """Build an ExclusionRecord, write it to the exclusions logger, and return it."""
+    record = ExclusionRecord(
+        mrn=mrn,
+        admission_ns=admission_ns,
+        reason=reason,
+        window_start_ns=window[0] if window else None,
+        window_end_ns=window[1] if window else None,
+        availability=availability,
+    )
     parts = [
         f"[{request_id}]",
         f"[EXCLUDED] cohort_id={cohort_id}",
         f"mrn={mrn}",
-        f"patient_id={patient_id}",
-        f"reason={reason}",
+        f"reason={reason.value}",
     ]
+    if admission_ns is not None:
+        parts.append(f"admission_ns={admission_ns}")
     if window is not None:
         parts.append(f"window=[{window[0]}, {window[1]}]")
     if availability is not None:
         parts.append(f"availability={availability:.4f}")
-    if threshold is not None:
-        parts.append(f"threshold={threshold}")
     _EXCLUSION_LOGGER.warning("  ".join(parts))
+    return record
