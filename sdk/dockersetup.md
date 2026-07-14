@@ -45,6 +45,7 @@ the SDK with all testing dependencies. It only needs to be re-run when `pyprojec
 or the `Dockerfile` itself changes.
 
 ```bash
+docker rmi atriumdb-sdk
 docker build -t atriumdb-sdk .
 ```
 
