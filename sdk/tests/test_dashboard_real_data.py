@@ -27,6 +27,7 @@ import pytest
 
 from atriumdb import AtriumSDK
 from atriumdb.dashboard.schemas import (
+    Admission,
     AdmissionDateRange,
     AgeBand,
     CohortDefinitionRequest,
@@ -184,7 +185,9 @@ def test_mrn_cohort_real_data(sdk):
     # Validate admissions per MRN where filled in.
     for cohort_id, expected_admissions in EXPECTED_MRN_ADMISSIONS.items():
         if expected_admissions:
-            resolved = {p.mrn: p.admissions for p in by_id[cohort_id]}
+            resolved = {
+                p.mrn: [a.admission_ns for a in p.admissions] for p in by_id[cohort_id]
+            }
             assert resolved == expected_admissions, (
                 f"Cohort '{cohort_id}': expected admissions {expected_admissions}, got {resolved}"
             )
@@ -214,23 +217,32 @@ EXPECTED_DEMOGRAPHIC_COHORTS: dict[str, set[str]] = {
     "female_age_2_5_7_11": {"MRN3E7DB077", "MRNAA5C025D","MRN376EFBF4"}
 }
 
-# Maps cohort_id → {mrn: admissions}.
-# Fill in once you know the admissions values from the printed output below.
-# Only cohorts with entries here are validated on admission time.
-EXPECTED_DEMOGRAPHIC_ADMISSIONS: dict[str, dict[str, list[int]]] = {
+# Maps cohort_id → {mrn: [Admission, ...]}.
+#
+# Each admission is checked in full: admission_ns, discharge_ns AND location must
+# all match. A patient who transferred between units has one Admission per unit,
+# so expect several entries for them, ordered by admission_ns.
+#
+# The admission_ns values below carry over from the previous run; discharge_ns and
+# location are new and still need filling in. Run the test and copy the paste-ready
+# block it prints (see "EXPECTED_DEMOGRAPHIC_ADMISSIONS" in the output) — then
+# eyeball the values against the dataset before trusting them.
+#
+# Only cohorts with entries here are validated; leave a cohort out to skip it.
+EXPECTED_DEMOGRAPHIC_ADMISSIONS: dict[str, dict[str, list[Admission]]] = {
     "male_age_10_0_15_0": {
-        "MRN824A6D3E": [1608553652000000000],
-        "MRND62AADF3": [1586531479000000000],
-        "MRN79BFCA31": [1597582892000000000],
+        "MRN824A6D3E": [Admission(admission_ns=1608553652000000000, discharge_ns=1610082209000000000, location="ICU")],
+        "MRND62AADF3": [Admission(admission_ns=1586531479000000000, discharge_ns=1586610119000000000, location="ICU")],
+        "MRN79BFCA31": [Admission(admission_ns=1597582892000000000, discharge_ns=1597729818000000000, location="ICU")],
     },
     "female_age_10_3_15_10": {
-        "MRN63163B57": [1591514059000000000],
-        "MRN44A9FE95": [1586164554000000000],
+        "MRN63163B57": [Admission(admission_ns=1591514059000000000, discharge_ns=1824889020735786141, location="ICU")],
+        "MRN44A9FE95": [Admission(admission_ns=1586164554000000000, discharge_ns=1586242193000000000, location="ICU")],
     },
     "female_age_2_5_7_11": {
-        "MRN3E7DB077": [1584420294000000000],
-        "MRNAA5C025D": [1587313853000000000],
-        "MRN376EFBF4": [1587319600000000000],
+        "MRN3E7DB077": [Admission(admission_ns=1584420294000000000, discharge_ns=1586155101000000000, location="ICU")],
+        "MRNAA5C025D": [Admission(admission_ns=1587313853000000000, discharge_ns=1587453694000000000, location="ICU")],
+        "MRN376EFBF4": [Admission(admission_ns=1587319600000000000, discharge_ns=1589456668000000000, location="ICU")],
     },
 }
 
@@ -285,6 +297,21 @@ def test_demographic_cohort_real_data(sdk):
             print(f"    mrn={p.mrn}  admissions={p.admissions}")
     print(f"{'='*60}")
 
+    # Paste-ready literal for EXPECTED_DEMOGRAPHIC_ADMISSIONS: copy the cohorts you
+    # want validated into the constant above rather than transcribing by hand.
+    print("\nEXPECTED_DEMOGRAPHIC_ADMISSIONS = {")
+    for cohort_id in EXPECTED_DEMOGRAPHIC_ADMISSIONS:
+        print(f'    "{cohort_id}": {{')
+        for p in sorted(by_id.get(cohort_id, []), key=lambda p: p.mrn):
+            entries = ", ".join(
+                f"Admission(admission_ns={a.admission_ns}, "
+                f"discharge_ns={a.discharge_ns}, location={a.location!r})"
+                for a in p.admissions
+            )
+            print(f'        "{p.mrn}": [{entries}],')
+        print("    },")
+    print("}")
+
     no_filter_mrns = {p.mrn for p in by_id["no_filters"]}
     assert len(no_filter_mrns) > 0, "Expected at least one patient in the 2020 window."
 
@@ -302,8 +329,8 @@ def test_demographic_cohort_real_data(sdk):
                 f"Cohort '{cohort_id}': expected MRNs {expected_mrns}, got {resolved_mrns}"
             )
 
-    # Validate admissions per MRN where filled in.
-    # Add entries to EXPECTED_DEMOGRAPHIC_ADMISSIONS (above) once you know the values.
+    # Validate admissions per MRN where filled in — admission_ns, discharge_ns and
+    # location must all match (Admission is a pydantic model, so == compares fields).
     for cohort_id, expected_admissions in EXPECTED_DEMOGRAPHIC_ADMISSIONS.items():
         if expected_admissions:
             resolved = {p.mrn: p.admissions for p in by_id[cohort_id]}
