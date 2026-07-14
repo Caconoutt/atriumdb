@@ -38,10 +38,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from atriumdb.dashboard.encounter_queries import (
-    group_encounters_by_visit,
+    group_encounters_by_admission,
     query_patient_encounters,
 )
 from atriumdb.dashboard.schemas import (
+    Admission,
     AdmissionDateRange,
     CohortDefinitionRequest,
     DemographicCohort,
@@ -55,6 +56,19 @@ if TYPE_CHECKING:
     from atriumdb import AtriumSDK
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _to_admission(record: dict) -> Admission:
+    """Build the response ``Admission`` from a grouped encounter record.
+
+    The admission and discharge times and the unit name all fall out of the
+    encounter join performed during filtering, so nothing is re-queried here.
+    """
+    return Admission(
+        admission_ns=record["admit_time_ns"],
+        discharge_ns=record["discharge_time_ns"],
+        location=record["unit_name"],
+    )
 
 
 def resolve_cohorts_local(
@@ -167,12 +181,14 @@ def _resolve_mrn_cohort(
         admit_end_ns=admission_date_range.end,
     )
 
-    visits = group_encounters_by_visit(encounter_rows)
+    admission_records = group_encounters_by_admission(encounter_rows)
 
-    # Collect all qualifying admission times per patient (one per distinct visit)
-    patient_admissions: dict[int, list[int]] = {}
-    for (pid, _vn), visit in visits.items():
-        patient_admissions.setdefault(pid, []).append(visit["admit_time_ns"])
+    # Collect all qualifying admissions per patient, each carrying its location
+    patient_admissions: dict[int, list[Admission]] = {}
+    for record in admission_records.values():
+        patient_admissions.setdefault(record["patient_id"], []).append(
+            _to_admission(record)
+        )
 
     mrns_with_admission = {
         patient_id_to_mrn[pid] for pid in patient_admissions
@@ -190,8 +206,11 @@ def _resolve_mrn_cohort(
         )
 
     return [
-        PatientAdmission(mrn=patient_id_to_mrn[pid], admissions=sorted(times))
-        for pid, times in patient_admissions.items()
+        PatientAdmission(
+            mrn=patient_id_to_mrn[pid],
+            admissions=sorted(admissions, key=lambda a: a.admission_ns),
+        )
+        for pid, admissions in patient_admissions.items()
     ]
 
 
@@ -208,9 +227,9 @@ def _resolve_demographic_cohort(
     **Stage 1 — Location + date filter (SQL)**
         Calls :func:`~atriumdb.dashboard.encounter_queries.query_patient_encounters`
         with ``locations`` and ``admissionDateRange``. Collapses rows to
-        per-visit records via
-        :func:`~atriumdb.dashboard.encounter_queries.group_encounters_by_visit`.
-        All qualifying visits per patient are retained — not just the earliest.
+        per-admission records via
+        :func:`~atriumdb.dashboard.encounter_queries.group_encounters_by_admission`.
+        All qualifying admissions per patient are retained — not just the earliest.
 
     **Stage 2 — Demographics fetch (SQL)**
         Calls ``sdk.sql_handler.select_all_patients_in_list`` with the
@@ -251,12 +270,12 @@ def _resolve_demographic_cohort(
         admit_end_ns=admission_date_range.end,
     )
 
-    visits = group_encounters_by_visit(encounter_rows)
+    admission_records = group_encounters_by_admission(encounter_rows)
 
-    # Collect all visits per patient — each (pid, visit_number) is a distinct admission
+    # Collect all admissions per patient — each (visit, unit) is a distinct admission
     patient_visits: dict[int, list[dict]] = {}
-    for (pid, _vn), visit in visits.items():
-        patient_visits.setdefault(pid, []).append(visit)
+    for record in admission_records.values():
+        patient_visits.setdefault(record["patient_id"], []).append(record)
 
     if not patient_visits:
         return []
@@ -300,8 +319,8 @@ def _resolve_demographic_cohort(
         if not sex_ok:
             continue
 
-        # Age filter: evaluated per visit at each admit_time_ns
-        qualifying_admissions: list[int] = []
+        # Age filter: evaluated per admission at each admit_time_ns
+        qualifying_admissions: list[Admission] = []
         for visit in visit_list:
             admit_time_ns = visit["admit_time_ns"]
             age_ok = True
@@ -315,11 +334,14 @@ def _resolve_demographic_cohort(
                         for band in cohort.age
                     )
             if age_ok:
-                qualifying_admissions.append(admit_time_ns)
+                qualifying_admissions.append(_to_admission(visit))
 
         if qualifying_admissions:
             surviving_patients.append(
-                PatientAdmission(mrn=str(mrn), admissions=sorted(qualifying_admissions))
+                PatientAdmission(
+                    mrn=str(mrn),
+                    admissions=sorted(qualifying_admissions, key=lambda a: a.admission_ns),
+                )
             )
 
     return surviving_patients

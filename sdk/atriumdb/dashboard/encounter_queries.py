@@ -29,7 +29,7 @@ This module provides two things:
    Only runs in direct-DB mode (``metadata_connection_type`` of
    ``"sqlite"``, ``"mysql"``, or ``"mariadb"``).
 
-3. ``group_encounters_by_visit`` — pure Python; collapses per-``encounter``
+3. ``group_encounters_by_admission`` — pure Python; collapses per-``encounter``
    rows from the SQL handler into per-visit admission records.
 """
 
@@ -66,9 +66,9 @@ def query_patient_encounters(
     :meth:`~atriumdb.sql_handler.sql_handler.SQLHandler.select_patient_encounters`
     which is implemented by both ``SQLiteHandler`` and ``MariaDBHandler``.
 
-    Returns one dict per ``encounter`` row (not per visit). Pass the result to
-    :func:`group_encounters_by_visit` to collapse rows into per-visit
-    admission records.
+    Returns one dict per ``encounter`` row (not per admission). Pass the result
+    to :func:`group_encounters_by_admission` to collapse rows into per-admission
+    records.
 
     :param sdk: AtriumSDK instance in direct-DB mode.
     :param patient_id_list: Restrict to these internal patient IDs.
@@ -127,45 +127,52 @@ def query_patient_encounters(
     ]
 
 
-def group_encounters_by_visit(
+def group_encounters_by_admission(
     encounter_rows: list[dict],
-) -> dict[tuple[int, str | None], dict]:
-    """Collapse per-encounter rows into per-visit admission records.
+) -> dict[tuple[int, str | None, str | None], dict]:
+    """Collapse per-encounter rows into per-admission records.
 
-    A hospital stay can produce multiple ``encounter`` rows sharing the same
-    ``visit_number`` (one row per bed/unit transfer). This function groups
-    those rows into a single visit record per ``(patient_id, visit_number)``
-    pair using the rules from design doc Assumption §7:
+    A hospital stay produces one ``encounter`` row per bed, so a single visit
+    can span many rows. Rows are grouped by ``(patient_id, visit_number,
+    unit_name)``, which collapses bed-to-bed moves *within* a unit into one
+    admission while keeping a transfer *between* units as two — each with its
+    own admission and discharge times, and a single unambiguous location.
 
-    - ``admit_time_ns``  = MIN(``start_time``) across the visit's rows
+    That split is what lets a caller asking for several locations (e.g. ICU and
+    OR) still see which unit each patient was actually in; a visit-level
+    grouping could only report the set of units the stay touched.
+
+    Within a group, per design doc Assumption §7:
+
+    - ``admit_time_ns``  = MIN(``start_time``) across the group's rows
     - ``discharge_time_ns`` = MAX(``end_time``); ``None`` if any row is still
       open (i.e. ``end_time`` is NULL), meaning the stay is ongoing.
 
-    Rows with ``visit_number = None`` are grouped under ``(patient_id, None)``
-    and aggregated with the same MIN/MAX rules as any other visit. A warning
-    is logged for each NULL ``visit_number`` encountered, as this indicates
-    incomplete data.
+    Rows with ``visit_number = None`` are grouped under a ``None`` visit number
+    and aggregated with the same rules. A warning is logged for each, as this
+    indicates incomplete data.
 
     :param encounter_rows: Output of :func:`query_patient_encounters` — one
         dict per ``encounter`` row.
-    :return: Dict keyed by ``(patient_id, visit_number)``::
+    :return: Dict keyed by ``(patient_id, visit_number, unit_name)``::
 
             {
-                (patient_id, visit_number): {
+                (patient_id, visit_number, unit_name): {
                     "patient_id":        int,
                     "visit_number":      str | None,
+                    "unit_name":         str | None,
                     "admit_time_ns":     int,
                     "discharge_time_ns": int | None,
-                    "unit_names":        set[str],
                 }
             }
     """
-    visits: dict[tuple[int, str | None], dict] = {}
+    admissions: dict[tuple[int, str | None, str | None], dict] = {}
 
     for row in encounter_rows:
         pid = row["patient_id"]
         vn = row["visit_number"]
-        key = (pid, vn)
+        unit_name = row["unit_name"] or None
+        key = (pid, vn, unit_name)
 
         if vn is None:
             _LOGGER.warning(
@@ -175,24 +182,22 @@ def group_encounters_by_visit(
                 row["encounter_id"],
             )
 
-        if key not in visits:
-            visits[key] = {
+        if key not in admissions:
+            admissions[key] = {
                 "patient_id":        pid,
                 "visit_number":      vn,
+                "unit_name":         unit_name,
                 "admit_time_ns":     row["start_time_ns"],
                 "discharge_time_ns": row["end_time_ns"],
-                "unit_names":        {row["unit_name"]} if row["unit_name"] else set(),
             }
         else:
-            v = visits[key]
-            if row["start_time_ns"] < v["admit_time_ns"]:
-                v["admit_time_ns"] = row["start_time_ns"]
+            a = admissions[key]
+            if row["start_time_ns"] < a["admit_time_ns"]:
+                a["admit_time_ns"] = row["start_time_ns"]
             # discharge_time = MAX(end_time); None if any row is still open
-            if v["discharge_time_ns"] is None or row["end_time_ns"] is None:
-                v["discharge_time_ns"] = None
-            elif row["end_time_ns"] > v["discharge_time_ns"]:
-                v["discharge_time_ns"] = row["end_time_ns"]
-            if row["unit_name"]:
-                v["unit_names"].add(row["unit_name"])
+            if a["discharge_time_ns"] is None or row["end_time_ns"] is None:
+                a["discharge_time_ns"] = None
+            elif row["end_time_ns"] > a["discharge_time_ns"]:
+                a["discharge_time_ns"] = row["end_time_ns"]
 
-    return visits
+    return admissions

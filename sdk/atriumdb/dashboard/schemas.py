@@ -43,18 +43,44 @@ class AdmissionDateRange(_Base):
     end: int
 
 
+class Admission(_Base):
+    """One qualifying admission, with the location the patient occupied.
+
+    The ``encounter → bed → unit`` join already runs during cohort resolution,
+    so the unit name is carried through to the response rather than discarded —
+    downstream consumers (the statistics endpoint, the Data Records table) need
+    it and would otherwise have to re-run the same join.
+
+    A stay that transfers between units produces one ``Admission`` per unit, so
+    that a cohort spanning several locations (e.g. ICU *and* OR) can still say
+    which one each patient was in. Bed-to-bed moves within a single unit are
+    collapsed into one admission.
+
+    :param admission_ns: Encounter start time in Unix epoch nanoseconds. This
+        anchors the downstream observation window.
+    :param discharge_ns: Encounter end time in Unix epoch nanoseconds; ``None``
+        when the stay is still open.
+    :param location: Unit name for this admission, e.g. ``"ICU"`` or ``"OR"``.
+        ``None`` when the encounter has no unit recorded.
+    """
+
+    admission_ns: int
+    discharge_ns: int | None = None
+    location: str | None = None
+
+
 class PatientAdmission(_Base):
     """A single patient in a resolved cohort with all their qualifying admissions.
 
     :param mrn: The patient's medical record number.
-    :param admissions: All qualifying encounter start times in Unix epoch
-        nanoseconds, sorted ascending. Each entry corresponds to a distinct
-        visit within the request's ``admission_date_range``. A patient with
-        multiple in-range visits will have multiple entries here.
+    :param admissions: All qualifying admissions, sorted ascending by
+        ``admission_ns``. Each entry corresponds to a distinct admission within
+        the request's ``admission_date_range``. A patient with multiple in-range
+        admissions will have multiple entries here.
     """
 
     mrn: str
-    admissions: list[int]
+    admissions: list[Admission]
 
 
 class AgeBand(_Base):
