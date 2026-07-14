@@ -77,7 +77,10 @@ def _body(mrns_and_admissions: list[tuple[str, list[int]]], availability_thresho
         "cohorts": [{
             "id": 1,
             "patients": [
-                {"mrn": mrn, "admissions": admissions}
+                {
+                    "mrn": mrn,
+                    "admissions": [{"admissionNs": admission_ns} for admission_ns in admissions],
+                }
                 for mrn, admissions in mrns_and_admissions
             ],
         }],

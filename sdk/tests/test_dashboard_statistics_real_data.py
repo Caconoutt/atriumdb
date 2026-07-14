@@ -19,6 +19,7 @@ import pytest
 
 from atriumdb import AtriumSDK
 from atriumdb.dashboard.schemas import (
+    Admission,
     AggregateStatisticsRequest,
     CohortInput,
     MeasureIdentifier,
@@ -106,7 +107,10 @@ def test_cohort_statistics_real_data(sdk):
         CohortInput(
             id=_COHORT_ID_MAP[cohort_id],
             patients=[
-                PatientAdmission(mrn=mrn, admissions=admissions)
+                PatientAdmission(
+                    mrn=mrn,
+                    admissions=[Admission(admission_ns=ns) for ns in admissions],
+                )
                 for mrn, admissions in mrn_map.items()
             ],
         )
