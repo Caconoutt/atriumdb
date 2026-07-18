@@ -22,6 +22,8 @@ Workflow
 """
 
 import os
+import json
+import datetime
 
 import pytest
 
@@ -337,3 +339,78 @@ def test_demographic_cohort_real_data(sdk):
             assert resolved == expected_admissions, (
                 f"Cohort '{cohort_id}': expected admissions {expected_admissions}, got {resolved}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Step 4 — measure coverage (measures/hours API)
+#
+# Queries block_index, converts num_values → hours via freq_nhz, and writes
+# a human-readable report to LOG_PATH.
+# ---------------------------------------------------------------------------
+
+# Override by setting ATRIUMDB_MEASURE_HOURS_LOG in the environment.
+_DEFAULT_LOG_PATH = os.path.join(
+    os.path.dirname(__file__), "measure_hours_report.log"
+)
+LOG_PATH = os.environ.get("ATRIUMDB_MEASURE_HOURS_LOG", _DEFAULT_LOG_PATH)
+
+
+def _fmt_hours(h: float) -> str:
+    total_minutes = int(h * 60)
+    hh, mm = divmod(total_minutes, 60)
+    return f"{hh:,} h {mm:02d} m"
+
+
+def test_measure_hours_report(sdk):
+    """Write a per-measure coverage report from block_index to LOG_PATH.
+
+    Counts stored samples from ``block_index`` and converts to hours using
+    each measure's ``freq_nhz``. Asserts all totals are non-negative. Read
+    the log file after the run for a human-friendly table.
+    """
+    rows = query_measure_total_hours(sdk)
+
+    if not rows:
+        pytest.skip("block_index is empty — dataset has no ingested blocks.")
+
+    for row in rows:
+        assert row["total_hours"] >= 0, (
+            f"Negative total_hours for measure {row['measure_id']}"
+        )
+
+    timestamp = datetime.datetime.now().isoformat(timespec="seconds")
+    lines = [
+        "=" * 66,
+        f"  AtriumDB Measure Coverage Report  —  {timestamp}",
+        f"  Dataset : {DATASET_LOCATION}",
+        f"  Source  : block_index  ({len(rows)} measures)",
+        "=" * 66,
+        "",
+        f"  {'ID':>6}  {'tag':<30}  {'units':<12}  {'total_hours':>14}",
+        "-" * 66,
+    ]
+    for r in rows:
+        lines.append(
+            f"  {r['measure_id']:>6}  {str(r['measure_tag'] or ''):<30}"
+            f"  {str(r['units'] or ''):<12}  {_fmt_hours(r['total_hours']):>14}"
+        )
+    grand = sum(r["total_hours"] for r in rows)
+    lines += [
+        "-" * 66,
+        f"  {'':>6}  {'TOTAL':<30}  {'':>12}  {_fmt_hours(grand):>14}",
+        "",
+        "=" * 66,
+        "",
+    ]
+    report = "\n".join(lines)
+
+    raw_json = json.dumps(rows, indent=2)
+
+    with open(LOG_PATH, "w", encoding="utf-8") as fh:
+        fh.write(report)
+        fh.write("\n\n--- RAW JSON ---\n\n")
+        fh.write(raw_json)
+        fh.write("\n")
+
+    print(f"\nMeasure coverage report written to: {LOG_PATH}")
+    print(report)

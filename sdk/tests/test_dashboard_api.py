@@ -19,18 +19,24 @@ import time
 import threading
 from pathlib import Path
 
+import requests
 import uvicorn
 
 from atriumdb.atrium_sdk import AtriumSDK
-from atriumdb.dashboard.schemas import (
-    AdmissionDateRange, AgeBand, CohortDefinitionRequest,
-    DemographicCohort, MrnCohort,
-)
+from atriumdb.dashboard.measure_queries import query_measure_total_hours
+# from atriumdb.dashboard.schemas import (
+#     AdmissionDateRange, AgeBand, CohortDefinitionRequest,
+#     DemographicCohort, MrnCohort,
+# )
 from tests.mock_api.app import app
 from tests.mock_api.sdk_dependency import get_sdk_instance
 
 DB_NAME = 'dashboard_api_test'
 SQLITE_DATASET_PATH = Path(__file__).parent / "test_datasets" / f"sqlite_{DB_NAME}"
+
+DB_NAME_HOURS = 'dashboard_api_hours_test'
+SQLITE_DATASET_PATH_HOURS = Path(__file__).parent / "test_datasets" / f"sqlite_{DB_NAME_HOURS}"
+HOURS_API_PORT = 8124
 
 
 def test_api_cohorts():
@@ -94,10 +100,10 @@ def _test_api_cohorts(db_type, dataset_location, connection_params):
     assert local_result.request_id == "test-1a-local"
     assert len(local_result.cohorts) == 1
     assert local_result.cohorts[0].id == "cohort_1a"
-    assert {p.mrn for p in local_result.cohorts[0].patients} == {"MRN001", "MRN002"}
+    assert set(local_result.cohorts[0].mrn_list) == {"MRN001", "MRN002"}
 
     api_result = api_sdk.dashboard_resolve_cohort(request_1a, request_id="test-1a-api")
-    assert {p.mrn for p in api_result.cohorts[0].patients} == {"MRN001", "MRN002"}
+    assert set(api_result.cohorts[0].mrn_list) == {"MRN001", "MRN002"}
 
     print("Testing 1B: demographic cohort — location filter...")
 
@@ -108,11 +114,11 @@ def _test_api_cohorts(db_type, dataset_location, connection_params):
     )
 
     # both in-window patients are in ICU; MRN003 is outside the window
-    local_result = sdk.dashboard_resolve_cohort(request_1b_loc, request_id="test-1b-loc-local")
-    assert {p.mrn for p in local_result.cohorts[0].patients} == {"MRN001", "MRN002"}
+    local_result = sdk.dashboard_resolve_cohort(request_1b_loc)
+    assert set(local_result.cohorts[0].mrn_list) == {"MRN001", "MRN002"}
 
-    api_result = api_sdk.dashboard_resolve_cohort(request_1b_loc, request_id="test-1b-loc-api")
-    assert {p.mrn for p in api_result.cohorts[0].patients} == {"MRN001", "MRN002"}
+    api_result = api_sdk.dashboard_resolve_cohort(request_1b_loc)
+    assert set(api_result.cohorts[0].mrn_list) == {"MRN001", "MRN002"}
 
     print("Testing 1B: demographic cohort — sex filter...")
 
@@ -122,11 +128,11 @@ def _test_api_cohorts(db_type, dataset_location, connection_params):
         cohorts=[DemographicCohort(id="cohort_1b_sex", location=["ICU"], sex=["M"])],
     )
 
-    local_result = sdk.dashboard_resolve_cohort(request_1b_sex, request_id="test-1b-sex-local")
-    assert {p.mrn for p in local_result.cohorts[0].patients} == {"MRN001"}
+    local_result = sdk.dashboard_resolve_cohort(request_1b_sex)
+    assert set(local_result.cohorts[0].mrn_list) == {"MRN001"}
 
-    api_result = api_sdk.dashboard_resolve_cohort(request_1b_sex, request_id="test-1b-sex-api")
-    assert {p.mrn for p in api_result.cohorts[0].patients} == {"MRN001"}
+    api_result = api_sdk.dashboard_resolve_cohort(request_1b_sex)
+    assert set(api_result.cohorts[0].mrn_list) == {"MRN001"}
 
     print("Testing 1B: demographic cohort — age filter...")
 
@@ -141,11 +147,11 @@ def _test_api_cohorts(db_type, dataset_location, connection_params):
         )],
     )
 
-    local_result = sdk.dashboard_resolve_cohort(request_1b_age, request_id="test-1b-age-local")
-    assert {p.mrn for p in local_result.cohorts[0].patients} == {"MRN001"}
+    local_result = sdk.dashboard_resolve_cohort(request_1b_age)
+    assert set(local_result.cohorts[0].mrn_list) == {"MRN001"}
 
-    api_result = api_sdk.dashboard_resolve_cohort(request_1b_age, request_id="test-1b-age-api")
-    assert {p.mrn for p in api_result.cohorts[0].patients} == {"MRN001"}
+    api_result = api_sdk.dashboard_resolve_cohort(request_1b_age)
+    assert set(api_result.cohorts[0].mrn_list) == {"MRN001"}
 
     print("Testing 1B: demographic cohort — multiple cohorts in one request...")
 
@@ -158,15 +164,93 @@ def _test_api_cohorts(db_type, dataset_location, connection_params):
         ],
     )
 
-    local_result = sdk.dashboard_resolve_cohort(request_multi, request_id="test-1b-multi-local")
+    local_result = sdk.dashboard_resolve_cohort(request_multi)
     assert len(local_result.cohorts) == 2
-    cohorts_by_id = {c.id: {p.mrn for p in c.patients} for c in local_result.cohorts}
+    cohorts_by_id = {c.id: set(c.mrn_list) for c in local_result.cohorts}
     assert cohorts_by_id["male_icu"] == {"MRN001"}
     assert cohorts_by_id["female_icu"] == {"MRN002"}
 
-    api_result = api_sdk.dashboard_resolve_cohort(request_multi, request_id="test-1b-multi-api")
-    cohorts_by_id = {c.id: {p.mrn for p in c.patients} for c in api_result.cohorts}
+    api_result = api_sdk.dashboard_resolve_cohort(request_multi)
+    cohorts_by_id = {c.id: set(c.mrn_list) for c in api_result.cohorts}
     assert cohorts_by_id["male_icu"] == {"MRN001"}
     assert cohorts_by_id["female_icu"] == {"MRN002"}
 
     api_sdk.close()
+
+
+def test_api_measure_total_hours():
+    def start_server():
+        uvicorn.run(app, port=HOURS_API_PORT)
+
+    api_thread = threading.Thread(target=start_server, daemon=True)
+    api_thread.start()
+
+    shutil.rmtree(SQLITE_DATASET_PATH_HOURS, ignore_errors=True)
+    _test_api_measure_total_hours('sqlite', SQLITE_DATASET_PATH_HOURS, None)
+
+
+def _test_api_measure_total_hours(db_type, dataset_location, connection_params):
+    sdk = AtriumSDK.create_dataset(
+        dataset_location=dataset_location, database_type=db_type, connection_params=connection_params)
+
+    app.dependency_overrides[get_sdk_instance] = lambda: sdk
+
+    # --- create measures and devices ---
+    hr_id = sdk.insert_measure(measure_tag="HR", freq=1, freq_units="Hz", units="BPM")
+    spo2_id = sdk.insert_measure(measure_tag="SpO2", freq=1, freq_units="Hz", units="%")
+    dev1_id = sdk.insert_device(device_tag="monitor_1")
+    dev2_id = sdk.insert_device(device_tag="monitor_2")
+
+    # Seed block_index directly — no C library (libTSC.so) needed.
+    # The query under test reads block_index.num_values and converts to hours
+    # using freq_nhz.  HR and SpO2 both have freq=1 Hz → freq_nhz=1_000_000_000.
+    #   HR   / device 1 → 7200 values  (= 2 h at 1 Hz)
+    #   HR   / device 2 → 3600 values  (= 1 h at 1 Hz)
+    #   SpO2 / device 1 → 3600 values  (= 1 h at 1 Hz)
+    _NS_PER_HOUR = 3_600_000_000_000
+    base_ns = 1_700_000_000 * 1_000_000_000
+    with sdk.sql_handler.connection(begin=True) as (conn, cursor):
+        cursor.executemany(
+            "INSERT INTO block_index "
+            "(measure_id, device_id, file_id, start_byte, num_bytes, start_time_n, end_time_n, num_values) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (hr_id,   dev1_id, 0, 0, 0, base_ns, base_ns + 2 * _NS_PER_HOUR, 7200),
+                (hr_id,   dev2_id, 0, 0, 0, base_ns, base_ns + 1 * _NS_PER_HOUR, 3600),
+                (spo2_id, dev1_id, 0, 0, 0, base_ns, base_ns + 1 * _NS_PER_HOUR, 3600),
+            ],
+        )
+
+    print("Testing measure_total_hours: local helper...")
+
+    local_result = query_measure_total_hours(sdk)
+    assert len(local_result) == 2
+
+    by_tag = {r["measure_tag"]: r for r in local_result}
+
+    assert set(by_tag["HR"].keys()) == {"measure_id", "measure_tag", "freq_nhz", "units",
+                                        "total_num_values", "total_ns", "total_hours"}
+    assert abs(by_tag["HR"]["total_hours"] - 3.0) < 1e-6
+    assert by_tag["HR"]["total_num_values"] == 10800
+    assert abs(by_tag["SpO2"]["total_hours"] - 1.0) < 1e-6
+    assert by_tag["SpO2"]["total_num_values"] == 3600
+
+    print("Testing measure_total_hours: API endpoint GET /measures/hours...")
+
+    # Give the server a moment to be ready.
+    time.sleep(0.5)
+
+    resp = requests.get(f"http://127.0.0.1:{HOURS_API_PORT}/measures/hours", timeout=10)
+    assert resp.status_code == 200
+
+    api_result = resp.json()
+    assert len(api_result) == 2
+
+    by_tag_api = {r["measure_tag"]: r for r in api_result}
+
+    assert abs(by_tag_api["HR"]["total_hours"] - 3.0) < 1e-6
+    assert by_tag_api["HR"]["total_num_values"] == 10800
+    assert abs(by_tag_api["SpO2"]["total_hours"] - 1.0) < 1e-6
+    assert by_tag_api["SpO2"]["total_num_values"] == 3600
+
+    print("All measure_total_hours tests passed.")
