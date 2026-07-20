@@ -46,6 +46,7 @@ or the `Dockerfile` itself changes.
 
 ```bash
 docker rmi atriumdb-sdk
+# or use: docker image prune
 docker build -t atriumdb-sdk .
 ```
 

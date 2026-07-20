@@ -3,7 +3,8 @@
 #
 # EDIT THE LINE BELOW — set this to the absolute path of your dataset on your Mac.
 # The folder must contain meta/index.db and a tsc/ subdirectory.
-HOST_DATASET_PATH="/absolute/path/to/your/dataset"
+# HOST_DATASET_PATH="/absolute/path/to/your/dataset"
+HOST_DATASET_PATH="/Users/xuexiaoying/Desktop/Work/26-SickKids/icu_liver_cohort_v5"
 
 # ---------------------------------------------------------------------------
 # Nothing below this line should need editing.
@@ -49,21 +50,44 @@ echo ""
 exec docker run --rm -it \
     -v "$HOST_DATASET_PATH:$CONTAINER_DATASET" \
     -v "$(pwd):/sdk" \
+    -v /sdk/bin \
     -e "ATRIUMDB_DATASET_LOCATION=$CONTAINER_DATASET" \
     "$IMAGE" \
     "${CMD[@]}"
 
 # # Commands on direct peeking meta tables (after enter imgae)
+# # #################################################################
+# # TODO: the measure table unit(freq_unit) insert needed for the get_measure_id method
+# python -c "
+# import sqlite3
+# conn = sqlite3.connect('/data/atriumdb/meta/index.db')
+
+# conn.execute('''
+#     UPDATE measure
+#     SET unit = 'nHz'
+#     WHERE tag = 'MDC_ECG_CARD_BEAT_RATE'
+# ''')
+# conn.commit()
+
+# rows = conn.execute('''
+#     SELECT *
+#     FROM measure
+#     WHERE tag = 'MDC_ECG_CARD_BEAT_RATE'
+# ''').fetchall()
+# print('row count:', len(rows))
+# for r in rows:
+#     print(r)
+# "
+# #  TODO #######################################################
+
 # python -c "
 # import sqlite3
 # conn = sqlite3.connect('/data/atriumdb/meta/index.db')
 
 # rows = conn.execute('''
-#     SELECT p.mrn, p.id, e.start_time, e.start_time - p.dob
-#     FROM encounter e
-#     JOIN patient p ON e.patient_id = p.id
-#     WHERE e.start_time >= 1577836800000000000
-#       AND e.start_time <= 1609459200000000000
+#     SELECT *
+#     FROM measure
+#     WHERE tag = 'MDC_ECG_CARD_BEAT_RATE' AND freq_nhz = 976562500 AND unit = 'nHz'
 # ''').fetchall()
 # print('row count:', len(rows))
 # for r in rows:
