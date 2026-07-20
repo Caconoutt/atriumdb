@@ -74,10 +74,16 @@ class ValueRange(_Base):
 #: Value bounds keyed by AtriumDB measure tag, e.g.
 #: ``{"MDC_ECG_CARD_BEAT_RATE": {"lower": 40, "upper": 200}}``.
 #:
-#: Resolution order, per tag per cohort:
-#:   1. the cohort's own ``value_range`` entry, if present;
-#:   2. else the request-level (global) ``value_range`` entry, if present;
-#:   3. else no filtering.
+#: Resolution, per tag per cohort: the cohort's own ``value_range`` entry and
+#: the request-level (global) entry are **intersected** — a value must satisfy
+#: both to count. The tighter bound wins at each end independently (highest
+#: floor, lowest ceiling), so a cohort can narrow the global range but never
+#: widen it. An end left open (``None``) constrains nothing, so the other
+#: side's bound carries. When only one of the two is present it applies alone;
+#: when neither is, the signal is unfiltered.
+#:
+#: Only the tag named by the request's ``measure`` is consulted — bounds keyed
+#: by any other tag are ignored.
 ValueRangeMap = dict[str, ValueRange]
 
 
@@ -142,9 +148,11 @@ class CohortInput(_Base):
     :param id: Integer cohort identifier.
     :param patients: Pre-resolved patient list from the cohort resolver.
     :param value_range: This cohort's own signal bounds, keyed by measure tag —
-        carried through from the dashboard query and overriding the request's
-        global ``value_range`` for this cohort. Omitted entirely when the cohort
-        set no bounds of its own, in which case the global range applies.
+        carried through from the dashboard query and intersected with the
+        request's global ``value_range`` for this cohort, so these bounds can
+        only narrow the global range, never widen it. Omitted entirely when the
+        cohort set no bounds of its own, in which case the global range applies
+        on its own.
     """
 
     id: int
@@ -171,9 +179,11 @@ class AggregateStatisticsRequest(_Base):
         Defaults to ``0.80``.
     :param value_range: Global signal bounds, keyed by measure tag. Values
         outside the bounds are treated as absent — they reduce a patient's data
-        availability rather than being averaged in. A cohort's own
-        ``value_range`` supersedes this for that cohort. Omitted when the query
-        set no global bounds.
+        availability rather than being averaged in, so an admission whose signal
+        is mostly out of range fails :attr:`availability_threshold` instead of
+        producing a plausible-looking mean. A cohort's own ``value_range`` is
+        intersected with this one for that cohort. Omitted when the query set no
+        global bounds.
     """
 
     cohorts: list[CohortInput]
