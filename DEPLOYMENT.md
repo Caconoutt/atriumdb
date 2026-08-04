@@ -72,6 +72,68 @@ first `up` (compose bind-mounts it, and a missing host path silently becomes an
 empty directory), and both repos must be checked out before the first `build`
 (compose reaches into `../atriumdb/sdk`). Everything else is linear.
 
+### Step 0 — prepare the dataset locally, before copying it
+
+If the dataset has waveform data but no ADT/encounter records, it needs MRNs,
+beds and encounter rows seeded before the dashboard can query it. Run this on
+your **own machine**, against your local copy, before the transfer:
+
+```bat
+REM Windows
+cd atriumdb\sdk
+python scripts\prepare_dataset.py "C:\path\to\local\dataset"
+```
+
+```bash
+# macOS / Linux
+cd atriumdb/sdk
+python3 scripts/prepare_dataset.py /path/to/local/dataset
+```
+
+Requirements: Python 3.7+ and nothing else. The script uses only the stdlib
+`sqlite3` module and never imports the SDK, so it runs on any OS — no Docker, no
+virtualenv, no install, and the macOS `OSError` does not apply.
+
+It writes to `meta/index.db` in place, taking a timestamped `.bak-<date>` copy
+first (`--no-backup` skips that). It is safe to re-run: encounters are deleted
+and re-derived every time, and MRNs are a deterministic hash of `patient_id`, so
+repeated runs produce identical rows. `-h` lists the options, and the module
+docstring documents each step it performs.
+
+Every run ends with a row count per table. Add `--dump` to print the rows
+themselves — `--limit N` caps rows per table (default 20, `0` for all) and
+`--tables patient,encounter` narrows which ones. **`--dump` prints patient data
+to the console**, so redirect it to a file you control rather than scrolling it,
+and keep `--limit` on for `block_index` and `interval_index`, which can hold
+millions of rows:
+
+```bat
+python scripts\prepare_dataset.py "C:\path\to\dataset" --dump --tables patient,encounter > dump.txt
+```
+
+Two Windows-specific notes, both already handled by the script but worth knowing:
+output is pure ASCII and stdout is forced to UTF-8, so redirecting to a file
+cannot fail with `UnicodeEncodeError` on a cp1252 console; and a trailing
+backslash is stripped from the path. Do not leave that backslash *inside* the
+quotes when you type it — `cmd.exe` reads `\"` as an escaped quote, so
+`"C:\path\to\dataset\"` breaks argument parsing before Python ever sees it.
+If the database is open in DB Browser for SQLite, close it first — Windows takes
+a mandatory lock and the backup copy will fail.
+
+Doing this locally is what lets the server side stay unchanged — the dataset
+arrives already prepared, so `atriumdb-api` keeps its read-only mount and no
+container ever needs write access to patient data. If you must instead run it on
+the server, the script ships in the image, but you have to mount the dataset
+writable to do it:
+
+```bash
+docker run --rm -v "$ATRIUMDB_DATASET_PATH:/data/atriumdb" \
+  sickkids_dashboard-atriumdb-api python scripts/prepare_dataset.py /data/atriumdb
+```
+
+Stop the stack first if it is already up — `atriumdb-api` holds an open SQLite
+handle on the same file.
+
 ### Step 1 — put the dataset on the server
 
 Copy it by whatever route your data-transfer policy allows (`rsync -a` over SSH
