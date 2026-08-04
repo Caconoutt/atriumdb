@@ -199,6 +199,27 @@ The two values that decide whether *this* container works:
 Also set `JWT_SECRET` to a generated value and change `POSTGRES_PASSWORD` —
 neither affects this container, but the stack is not safe to expose without them.
 
+### Steps 4–7 at a glance
+
+Run these in this order, from `~/sickkids/SickKids_Dashboard`, waiting for each
+to finish before starting the next:
+
+```bash
+cd ~/sickkids/SickKids_Dashboard   # 1. every compose command runs from here
+docker compose config              # 2. check .env substitution before building
+docker compose build               # 3. build the three buildable images
+docker compose up -d atriumdb-api  # 4. start THIS service alone
+docker compose logs -f atriumdb-api        # 5. watch it boot, Ctrl-C to detach
+docker compose exec atriumdb-api ls -l /data/atriumdb   # 6. prove the mount
+docker compose up -d               # 7. start the other three
+docker compose ps                  # 8. all four Up
+docker compose logs -f backend atriumdb-api   # 9. watch while you click through
+```
+
+Steps 4–6 exist to fail fast: a wrong dataset path shows up there in seconds,
+rather than as an opaque 502 through two proxies after everything is running.
+The rest of this section explains each command.
+
 ### Step 4 — build
 
 ```bash
@@ -206,12 +227,48 @@ cd ~/sickkids/SickKids_Dashboard
 docker compose build
 ```
 
+Line by line:
+
+* `cd ~/sickkids/SickKids_Dashboard` — not optional and not just convenience.
+  Compose reads `docker-compose.yml` and `.env` from the *current directory*,
+  and resolves `context: ../atriumdb/sdk` relative to the compose file. Run it
+  from anywhere else and you get either "no configuration file provided" or a
+  build context pointing at the wrong tree. Every command from here to the end
+  of the document assumes this directory.
+* `docker compose build` — builds an image for every service that has a
+  `build:` section: `frontend`, `backend`, and `atriumdb-api`. `postgres` is a
+  pulled image, so there is nothing to build for it. This **starts nothing** —
+  no container runs, no port opens, the dataset is not touched. It is safe to
+  run repeatedly.
+
 First build takes several minutes (compiling the MariaDB extension dominates).
-To build only this service:
+Later builds reuse the layer cache and are much faster, unless you changed
+something early in the Dockerfile.
+
+Two optional commands around it:
 
 ```bash
-docker compose build atriumdb-api
+docker compose config                    # print the fully-resolved compose file
+docker compose build atriumdb-api        # build only this service
 ```
+
+* `docker compose config` — renders **the dashboard's `docker-compose.yml`**,
+  all four services including `atriumdb-api`, with every `${VAR}` from `.env`
+  already substituted, then exits. It is a pure text operation on that one file:
+  it does **not** read anything inside the atriumdb repo, does not open
+  `sdk/Dockerfile`, and does not check that `../atriumdb/sdk` exists — it only
+  rewrites that path to an absolute one. A context pointing at a repo you never
+  cloned renders here without complaint and only fails at `build`.
+
+  What it does catch is an **unset or empty** variable. A blank
+  `ATRIUMDB_DATASET_PATH` makes the volume spec collapse to `:/data/atriumdb:ro`
+  and `config` hard-errors with `invalid spec: empty section between colons` —
+  which is exactly the mistake worth catching before a multi-minute build. It
+  does **not** catch a path that is non-empty but wrong: a typo'd path renders
+  cleanly, and only the `ls -l` check in step 5 exposes it.
+* `docker compose build atriumdb-api` — same as above but limited to this one
+  service. Use it when only this repo changed; it skips the frontend and backend
+  images entirely.
 
 ### Step 5 — start this service alone and prove it before the rest
 
@@ -219,6 +276,19 @@ docker compose build atriumdb-api
 docker compose up -d atriumdb-api
 docker compose logs -f atriumdb-api      # expect: "Uvicorn running on http://0.0.0.0:8000"
 ```
+
+* `docker compose up -d atriumdb-api` — creates the stack's bridge network if it
+  does not exist, creates the `atriumdb-api` container from the image built in
+  step 4, applies the environment and the read-only bind mount, and starts it.
+  Naming the service limits `up` to that service plus anything it `depends_on`
+  — this one depends on nothing, so exactly one container starts. `-d` is
+  detached: it returns to the shell instead of streaming logs. Without `-d` the
+  container dies when you close the SSH session.
+* `docker compose logs -f atriumdb-api` — prints this container's stdout/stderr
+  and `-f` keeps following as new lines arrive. You are waiting for
+  `Uvicorn running on http://0.0.0.0:8000`; anything else (a Python traceback, an
+  immediate exit) means the image or the config is wrong. **Ctrl-C stops the log
+  stream, not the container** — the service keeps running after you detach.
 
 Confirm the dataset actually landed, and read-only:
 
@@ -228,6 +298,20 @@ docker compose exec atriumdb-api ls -l /data/atriumdb
 docker compose exec atriumdb-api touch /data/atriumdb/_wtest
 # must fail with "Read-only file system"
 ```
+
+* `docker compose exec atriumdb-api <cmd>` — runs `<cmd>` inside the *already
+  running* container. (`exec` needs the container up; `run` would start a
+  throwaway second one, which is not what you want here.)
+* `ls -l /data/atriumdb` — the container-side end of the bind mount. You must
+  see `meta/` and `tsc/`. An empty listing means the host path in `.env` does not
+  exist and Docker silently created an empty directory in its place — fix
+  `ATRIUMDB_DATASET_PATH` and re-run `docker compose up -d atriumdb-api`. Seeing
+  the dataset's *parent* contents instead means the path is one level too high.
+* `touch /data/atriumdb/_wtest` — deliberately tries to write. It **must** fail
+  with `Read-only file system`. Failure is the pass condition: it proves the
+  `:ro` flag is in effect and no container can modify patient data. If it
+  succeeds, the mount lost its `:ro` — stop and fix that before going further
+  (and delete the stray `_wtest` file it created).
 
 Then run the route checks in §5. Do this **before** starting the other three
 services — a dataset-path mistake surfaces here in seconds, versus as an opaque
@@ -239,6 +323,17 @@ services — a dataset-path mistake surfaces here in seconds, versus as an opaqu
 docker compose up -d
 docker compose ps        # all four Up; postgres and backend healthy
 ```
+
+* `docker compose up -d` — same command as step 5 with no service named, so it
+  applies to all four. `atriumdb-api` is already running and its configuration
+  has not changed, so compose leaves it alone rather than restarting it; the
+  other three (`postgres`, `backend`, `frontend`) are created and started, in
+  `depends_on` order. This is also the command that publishes the host port.
+* `docker compose ps` — one row per container with its state and published
+  ports. You want all four `Up`, and `postgres` and `backend` reporting
+  `(healthy)` — they define healthchecks, so `Up (starting)` for a few seconds is
+  normal. A container in `Exited` or restart-looping is the one to pull logs
+  from: `docker compose logs <service>`.
 
 The dashboard is then on `http://<server>:${HTTP_PORT}` (default 8080).
 
@@ -252,6 +347,14 @@ while you do it:
 ```bash
 docker compose logs -f backend atriumdb-api
 ```
+
+* Naming two services interleaves both log streams, each line prefixed with its
+  service name. Start it *before* you click in the browser, then watch a single
+  cohort query travel: the `backend` request line first, then the matching
+  `atriumdb-api` line. A request that appears in `backend` but never in
+  `atriumdb-api` is a networking or URL problem; one that appears in both but
+  errors in `atriumdb-api` is a dataset or SDK problem — which tells you which
+  log to dig into. Ctrl-C when done; nothing stops.
 
 ## 4. Operating the container
 
