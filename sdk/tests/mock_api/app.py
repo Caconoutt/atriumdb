@@ -30,3 +30,14 @@ app.include_router(devices_router, prefix="/devices")
 app.include_router(label_endpoints.router, prefix="/labels")
 app.include_router(patient_endpoints.router, prefix="/patients")
 app.include_router(cohort_router, prefix="/cohorts")
+
+
+@app.get("/health")
+async def health():
+    """Liveness probe for container orchestration.
+
+    Deliberately does not touch the SDK: it answers whether the process is
+    serving, which is what a healthcheck should gate `depends_on` upon. Dataset
+    problems surface as errors on the routes that actually read it.
+    """
+    return {"status": "ok"}

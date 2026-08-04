@@ -15,8 +15,35 @@
 #     You should have received a copy of the GNU General Public License
 #     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import os
+from functools import lru_cache
+
 from atriumdb import AtriumSDK
 
+DATASET_LOCATION_ENV_VAR = "ATRIUMDB_DATASET_LOCATION"
 
+
+@lru_cache(maxsize=1)
 def get_sdk_instance() -> AtriumSDK:
-    return AtriumSDK()
+    """Return the process-wide AtriumSDK, opening the dataset on first use.
+
+    The dataset directory — the one holding ``meta/index.db`` and ``tsc/`` — comes
+    from ``ATRIUMDB_DATASET_LOCATION``. The SDK constructor does not read that
+    variable itself (only the CLI does), so it is passed explicitly here.
+
+    Cached because building an instance re-loads the C library and re-reads the
+    settings table, and this runs as a FastAPI ``Depends`` — once per request
+    without the cache. Sharing one instance is safe for the direct-DB path:
+    :class:`~atriumdb.sql_handler.sqlite.sqlite_handler.SQLiteHandler` opens a
+    fresh connection per query rather than holding one on the instance.
+
+    Tests do not go through this function — they inject their own SDK through
+    ``app.dependency_overrides``.
+    """
+    dataset_location = os.environ.get(DATASET_LOCATION_ENV_VAR)
+    if not dataset_location:
+        raise RuntimeError(
+            f"{DATASET_LOCATION_ENV_VAR} is not set. Point it at the dataset "
+            f"directory containing meta/index.db and tsc/."
+        )
+    return AtriumSDK(dataset_location=dataset_location)

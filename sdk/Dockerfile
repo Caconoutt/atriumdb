@@ -15,6 +15,10 @@ COPY . .
 # Editable mode (-e) means changes to the source are picked up without rebuilding.
 RUN pip install --no-cache-dir -e ".[testing]"
 
-# Default command: run the dashboard cohort tests.
-# Override this on the docker run command line to run a different test file or get a shell.
-CMD ["python", "-m", "pytest", "tests/test_dashboard_api.py", "-v", "-s"]
+EXPOSE 8000
+
+# Default command: serve the API the dashboard calls.
+# The dataset directory must be mounted and ATRIUMDB_DATASET_LOCATION set to it.
+# Override on the command line to run tests instead, e.g.
+#   docker run --rm atriumdb-sdk python -m pytest tests/test_dashboard_api.py -v -s
+CMD ["uvicorn", "tests.mock_api.app:app", "--host", "0.0.0.0", "--port", "8000"]

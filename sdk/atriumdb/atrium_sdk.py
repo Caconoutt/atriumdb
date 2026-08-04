@@ -2153,9 +2153,10 @@ class AtriumSDK:
             target_freq_nhz = convert_to_nanohz(freq, freq_units)
         elif freq is not None:
             target_freq_nhz = freq
-        else:
+        elif period is not None:
             period_ns = int(period * time_unit_options[time_units])
             target_freq_nhz = 10 ** 18 // period_ns
+        # Neither given: leave target_freq_nhz None so frequency is not a filter.
 
         # Get all measures from the database
         all_measures = self.get_all_measures()

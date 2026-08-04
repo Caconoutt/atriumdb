@@ -4,3 +4,10 @@ __pycache__/
 *.pyo
 .pytest_cache/
 tests/test_datasets/
+
+# Host virtualenv — macOS binaries, useless and ~15MB inside a Linux image.
+.venv/
+# Local dev config; the container gets its environment from compose.
+.env
+.DS_Store
+docs/
