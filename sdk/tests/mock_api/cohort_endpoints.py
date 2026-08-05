@@ -27,7 +27,7 @@ router = APIRouter()
 @router.post("", response_model=MrnCohortResponse)
 async def post_cohorts(
     body: CohortDefinitionRequest,
-    x_request_id: str = Header(default=""),
+    x_request_id: str = Header(..., min_length=1),
     sdk: AtriumSDK = Depends(get_sdk_instance),
 ) -> MrnCohortResponse:
     """Resolve cohort definitions into validated MRN lists.
@@ -40,8 +40,9 @@ async def post_cohorts(
 
     :param body: Parsed request body containing the cohort type, the shared
         ``admissionDateRange``, and one or more cohort definitions.
-    :param x_request_id: Optional ``X-Request-ID`` header for log correlation,
-        echoed back in the response ``requestId`` field.
+    :param x_request_id: Required ``X-Request-ID`` header for log correlation,
+        echoed back in the response ``requestId`` field. A missing or empty
+        header is rejected with a 422 before any query runs.
     :param sdk: AtriumSDK instance injected by ``get_sdk_instance``.
     :return: :class:`~atriumdb.dashboard.schemas.MrnCohortResponse` with one
         resolved cohort per input cohort.
