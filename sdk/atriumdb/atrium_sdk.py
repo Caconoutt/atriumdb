@@ -3133,59 +3133,31 @@ class AtriumSDK:
         self.get_all_patients()
         return {pid: self._patient_id_to_mrn[pid] for pid in patient_id_list_int if pid in self._patient_id_to_mrn}
 
-    def dashboard_resolve_cohort(self, request, request_id: str = ""):
-        """Resolve a cohort definition request into validated MRN lists.
-
-        Supports both direct-DB and API modes using the same dual-mode pattern
-        as other SDK methods (e.g. ``get_mrn_to_patient_id_map``):
-
-        - **Direct-DB mode** (``metadata_connection_type`` of ``"sqlite"``,
-          ``"mysql"``, or ``"mariadb"``): the resolution runs in-process,
-          querying the database directly via ``sql_handler``.
-        - **API mode** (``metadata_connection_type="api"``): the request is
-          serialised to JSON and forwarded to the dashboard server at
-          ``POST /cohorts``. The server runs the same resolution logic locally
-          and returns the result as JSON, which is deserialised back into a
-          :class:`~atriumdb.dashboard.schemas.MrnCohortResponse`.
-
-        The ``request`` argument is a
-        :class:`~atriumdb.dashboard.schemas.CohortDefinitionRequest` and the
-        return value is a
-        :class:`~atriumdb.dashboard.schemas.MrnCohortResponse`. Both are
-        Pydantic models defined in ``atriumdb.dashboard.schemas``.
-
-        **Priority 1A** (``request.type == "mrn"``)
-            Each cohort's ``mrnList`` is validated in two steps: existence in
-            the ``patient`` table, then at least one ``encounter`` record
-            within ``admissionDateRange``. MRNs failing either check are
-            silently excluded and logged server-side.
-
-        **Priority 1B** (``request.type == "demographic"``)
-            Candidates are drawn from ``encounter`` rows within
-            ``admissionDateRange`` at the specified location. Each patient's
-            reference admission (earliest in-range visit) anchors the
-            age-at-admission check. Active filters (age, sex) are AND-ed;
-            values within each filter are OR-ed.
+    def dashboard_resolve_cohort(self, request, request_id: str):
+        """Resolve a cohort definition request into validated patient lists.
 
         :param request: A
             :class:`~atriumdb.dashboard.schemas.CohortDefinitionRequest`
             instance describing the cohort type, the shared admission date
             range, and one or more cohort definitions.
-        :param request_id: Correlation ID attached to log messages and echoed
+        :param request_id: Correlation ID supplied by the caller, attached to
+            every log message emitted while resolving this request and echoed
             in the response ``requestId`` field. Corresponds to the
-            ``X-Request-ID`` header in the HTTP API. Must be a non-empty string.
+            ``X-Request-ID`` header in the HTTP API. Required — there is no
+            default, and a blank value is rejected before any query runs so
+            that no resolution work is ever performed untraceably.
         :type request_id: str
         :return: A
             :class:`~atriumdb.dashboard.schemas.MrnCohortResponse` containing
-            one resolved ``ResolvedCohort`` per input cohort. Every MRN in the
-            response is confirmed to exist in AtriumDB and to have at least one
-            admission record within the requested date range.
+            one resolved ``ResolvedCohort`` per input cohort. Every patient in
+            the response is confirmed to exist in AtriumDB and to have at least
+            one admission record within the requested date range.
         :rtype: MrnCohortResponse
-        :raises ValueError: If ``request_id`` is ``None`` or an empty string.
+        :raises ValueError: If ``request_id`` is ``None``, empty, or blank.
         """
-        if not request_id:
+        if request_id is None or not str(request_id).strip():
             _LOGGER.error(
-                "dashboard_resolve_cohort called with missing or empty "
+                "dashboard_resolve_cohort called with missing or blank "
                 "request_id — every dashboard request must supply a non-empty request_id."
             )
             raise ValueError("request_id must be a non-empty string.")
