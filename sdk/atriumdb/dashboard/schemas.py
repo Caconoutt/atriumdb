@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 from pydantic.alias_generators import to_camel
 
 
@@ -159,6 +159,26 @@ class CohortDefinitionRequest(_Base):
     admission_date_range: AdmissionDateRange
     cohorts: list[MrnCohort] | list[DemographicCohort]
 
+    @model_validator(mode="after")
+    def _cohorts_match_type(self) -> "CohortDefinitionRequest":
+        """Reject a request whose cohorts do not match its ``type``.
+
+        The union above is resolved by shape, not by ``type``, so a
+        ``"demographic"`` request carrying ``mrnList`` entries would otherwise
+        parse as ``MrnCohort`` and fail later with an ``AttributeError`` deep
+        in the resolver. Checking here turns that into a validation error at
+        the request boundary.
+        """
+        expected = MrnCohort if self.type == "mrn" else DemographicCohort
+        for cohort in self.cohorts:
+            if not isinstance(cohort, expected):
+                raise ValueError(
+                    f"type={self.type!r} requires every cohort to be a "
+                    f"{expected.__name__}; cohort id={getattr(cohort, 'id', '?')!r} "
+                    f"parsed as {type(cohort).__name__}."
+                )
+        return self
+
 
 class ResolvedCohort(_Base):
     """A single resolved cohort in the response.
@@ -177,8 +197,9 @@ class ResolvedCohort(_Base):
 class MrnCohortResponse(_Base):
     """Response body for ``POST /cohorts``.
 
-    :param request_id: Echo of the ``X-Request-ID`` request header, or an empty
-        string if the header was omitted.
+    :param request_id: Echo of the ``X-Request-ID`` request header. Always
+        non-empty — a missing or blank header is rejected before resolution
+        begins, so it can be used as a correlation key against server logs.
     :param cohorts: One ``ResolvedCohort`` per input cohort, in the same order
         as the request.
     """
