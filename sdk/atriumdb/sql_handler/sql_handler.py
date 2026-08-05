@@ -523,6 +523,39 @@ class SQLHandler(ABC):
         # Get all matching measures.
         pass
 
+    def select_measure_total_values(self) -> List[tuple]:
+        """Sum the stored sample count per measure across every device.
+
+        Aggregates ``block_index.num_values`` — the number of samples actually
+        written during ingestion — so gaps in acquisition are excluded rather
+        than counted as coverage. Measures with ``freq_nhz = 0`` (aperiodic and
+        annotation signals, where a sample count cannot be converted to a
+        duration) are omitted.
+
+        The SQL is identical on both backends, so it is implemented once here
+        rather than in ``SQLiteHandler`` and ``MariaDBHandler`` separately. Every
+        selected column is named in the GROUP BY, which keeps it valid under
+        MySQL/MariaDB's ``ONLY_FULL_GROUP_BY``.
+
+        Results are returned in whatever order the database produces; callers
+        that need a specific order must sort themselves.
+
+        :return: List of tuples, one per measure::
+
+                (measure_id, measure_tag, freq_nhz, units, total_num_values)
+        """
+        measure_total_values_query = (
+            "SELECT m.id, m.tag, m.freq_nhz, m.unit, SUM(bi.num_values) "
+            "FROM block_index bi "
+            "JOIN measure m ON m.id = bi.measure_id "
+            "WHERE m.freq_nhz > 0 "
+            "GROUP BY m.id, m.tag, m.freq_nhz, m.unit"
+        )
+
+        with self.connection(begin=False) as (conn, cursor):
+            cursor.execute(measure_total_values_query)
+            return cursor.fetchall()
+
     @abstractmethod
     def select_all_patients_in_list(self, patient_id_list: Optional[List[int]] = None, mrn_list: Optional[List[str]] = None):
         # Get all matching patients.

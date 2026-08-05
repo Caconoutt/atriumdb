@@ -17,9 +17,11 @@
 
 """Dashboard-layer helpers for measure-level coverage statistics.
 
-Uses ``block_index`` to count stored samples per ``(measure_id, device_id)``
-block, then converts to nanoseconds using the measure's sampling frequency
-(``freq_nhz``, stored in nano-Hz).  The conversion is:
+Contains no raw SQL — the sample-count aggregation is delegated to
+:meth:`~atriumdb.sql_handler.sql_handler.SQLHandler.select_measure_total_values`,
+which sums ``block_index.num_values`` per measure across all devices. This
+module converts that count to time units using the measure's sampling frequency
+(``freq_nhz``, stored in nano-Hz):
 
     period_ns  = 10^18 / freq_nhz        (since freq_nhz = Hz × 10^9)
     total_ns   = SUM(num_values) × period_ns
@@ -43,19 +45,7 @@ _LOGGER = logging.getLogger(__name__)
 
 _NS_PER_HOUR = 3_600_000_000_000
 
-_MEASURE_TOTAL_HOURS_SQL = """
-    SELECT
-        m.id                          AS measure_id,
-        m.tag                         AS measure_tag,
-        m.freq_nhz,
-        m.unit                        AS units,
-        SUM(bi.num_values)            AS total_num_values
-    FROM block_index bi
-    JOIN measure m ON m.id = bi.measure_id
-    WHERE m.freq_nhz > 0
-    GROUP BY bi.measure_id
-"""
-
+# Must match the column order of SQLHandler.select_measure_total_values().
 _MEASURE_TOTAL_HOURS_KEYS = (
     "measure_id",
     "measure_tag",
@@ -68,12 +58,15 @@ _MEASURE_TOTAL_HOURS_KEYS = (
 def query_measure_total_hours(sdk: "AtriumSDK") -> list[dict]:
     """Return data-coverage hours per measure across all devices.
 
-    Counts stored samples from ``block_index``, then converts to hours using
-    each measure's ``freq_nhz``.  Measures with ``freq_nhz = 0`` (aperiodic /
-    annotation signals) are excluded.
+    Counts stored samples via
+    :meth:`~atriumdb.sql_handler.sql_handler.SQLHandler.select_measure_total_values`,
+    then converts to hours using each measure's ``freq_nhz``.  Measures with
+    ``freq_nhz = 0`` (aperiodic / annotation signals) are excluded by the
+    handler.
 
     :param sdk: AtriumSDK instance in direct-DB mode.
-    :return: List of dicts, one per measure, ordered by ``total_hours`` descending::
+    :return: List of dicts, one per measure, in database order — callers that
+        need a particular order must sort themselves::
 
             {
                 "measure_id":      int,
@@ -85,9 +78,7 @@ def query_measure_total_hours(sdk: "AtriumSDK") -> list[dict]:
                 "total_hours":     float,
             }
     """
-    with sdk.sql_handler.connection(begin=False) as (conn, cursor):
-        cursor.execute(_MEASURE_TOTAL_HOURS_SQL)
-        rows = cursor.fetchall()
+    rows = sdk.sql_handler.select_measure_total_values()
 
     result = []
     for row in rows:
@@ -100,6 +91,5 @@ def query_measure_total_hours(sdk: "AtriumSDK") -> list[dict]:
         entry["total_hours"] = total_ns / _NS_PER_HOUR
         result.append(entry)
 
-    result.sort(key=lambda x: x["total_hours"], reverse=True)
     _LOGGER.debug("%d measures queried for hours.", len(result))
     return result
