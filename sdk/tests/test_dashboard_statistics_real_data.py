@@ -49,7 +49,7 @@ def sdk():
 
 STATS_MEASURE_TAG: str       = "MDC_ECG_CARD_BEAT_RATE"
 STATS_FREQ: float            = 976562500
-STATS_UNITS: str | None      = 'nHz'
+STATS_UNITS: str | None      = "MDC_DIM_BEAT_PER_MIN"
 STATS_FREQ_UNITS: str | None = None
 
 STATS_WINDOW_NS: int                = 24 * 3600 * 1_000_000_000  # 24 hours
