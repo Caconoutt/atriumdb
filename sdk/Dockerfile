@@ -6,6 +6,9 @@ WORKDIR /sdk
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc \
         libmariadb-dev \
+        libgomp1 \
+        liblz4-1 \
+        libzstd1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy project source into the image.
