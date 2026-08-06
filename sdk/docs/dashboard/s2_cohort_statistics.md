@@ -1,370 +1,390 @@
 # Step 2 — Aggregate Statistics Across Cohorts
 
-This document describes the implementation plan for computing per-cohort aggregate statistics (mean, median, SD) for a given physiological measure over a fixed observation window anchored to each patient's admission time.
+This document describes the implementation as it exists in the codebase: the schemas, the
+statistics pipeline, the SDK method, the FastAPI endpoint, and the tests. It is the S2
+counterpart to `s1_cohort_definition_plan.md`.
+
+Given cohorts already resolved by S1, it computes **one mean signal value per (patient,
+admission)** over an observation window anchored at each admission, and reports every entry it
+dropped and why. No cross-patient aggregation happens here — mean, median, SD, quartiles and KDE
+are all left to the dashboard.
 
 ---
 
-## Overview
+## 0. Overview
 
 **Inputs**
-- `cohort_result` — output of the existing cohort resolver (Step 1): a list of cohorts, each with an `id` and a `mrn_list`. All MRNs are guaranteed to have at least one encounter within the cohort's admission date range — this has already been validated by the resolver and does not need to be re-checked here.
-- `measure_tag` — the signal to analyse (e.g. `"MDC_ECG_CARD_BEAT_RATE"`)
-- `observation_hours` — length of the observation window in hours, anchored at each patient's earliest admission (e.g. `24`)
-- `availability_threshold` — minimum fraction of the window that must be covered by valid data for a patient to be included (e.g. `0.80` = 80 %)
+- `cohorts` — pre-resolved cohorts from the S1 resolver. Each patient carries their qualifying
+  admissions, already validated against the admission date range; S2 does not re-check them.
+- `measure` — the signal to analyse, identified by tag + frequency (+ optional units).
+- `observation_window` — either a fixed span in nanoseconds anchored at each admission, or
+  `"all_time"` to use the admission's own discharge as the end.
+- `availability_threshold` — minimum fraction of the window that must be covered by usable data.
+- `value_range` — optional signal bounds, globally and/or per cohort.
 
-**Output** — top-level response body:
+**Output** (camelCase on the wire — every model sets `alias_generator=to_camel`):
+
 ```json
 {
   "cohorts": [
     {
-      "cohort_id": 1,
-      "n_candidates": 180,
-      "n_included": 152,
-      "n_excluded": 28,
-      "patient_results": [
-        { "mrn": "123456", "mean": 74.1 },
-        { "mrn": "234567", "mean": 78.3 }
-      ]
-    },
-    {
-      "cohort_id": 2,
-      "n_candidates": 170,
-      "n_included": 140,
-      "n_excluded": 30,
-      "patient_results": [
-        { "mrn": "345678", "mean": 71.2 },
-        { "mrn": "456789", "mean": 69.8 }
+      "cohortId": 1,
+      "nPatients": 180,
+      "nVisits": 194,
+      "nIncluded": 152,
+      "nExcluded": 42,
+      "patientResults": [
+        {"mrn": "<MRN>", "admissionNs": 1700000000000000000, "mean": 74.1,
+         "sex": "M", "ageMonths": 40, "location": "ICU"}
+      ],
+      "exclusions": [
+        {"mrn": "<MRN>", "admissionNs": 1700100000000000000,
+         "reason": "below_availability_threshold",
+         "windowStartNs": 1700100000000000000, "windowEndNs": 1700186400000000000,
+         "availability": 0.61}
       ]
     }
   ]
 }
 ```
 
-`cohorts` contains one entry per cohort. Each `patient_results` entry is the per-patient mean of the signal over the observation window — raw enough to export and sufficient for the client to compute any statistics or render any plot (box, violin, etc.). All aggregation (mean, median, SD, quartiles, KDE) is left to the client(dashboard server).
+Each `patientResults` entry is one **admission**, not one patient: a patient with two qualifying
+admissions produces two entries, keyed by `(mrn, admissionNs)`. Every dropped entry appears in
+`exclusions` with enough context to explain the drop without re-running the request.
 
 ---
 
-## Step 1 — Schema Design
-
-### Request
-
-```python
-class MeasureIdentifier(BaseModel):
-    measure_tag: str        # e.g. "MDC_ECG_CARD_BEAT_RATE"
-    freq:        float      # numeric frequency value
-    units:       str        # e.g. "BPM"
-    freq_units:  str        # e.g. "Hz", "kHz", "nHz"
-    # These four are passed directly to sdk.get_measure_id() to resolve the
-    # internal measure_id. Returns None if no matching measure exists.
-    #
-    # sdk.get_measure_id(
-    #     measure_tag, freq=freq, units=units, freq_units=freq_units
-    # ) -> int | None
-
-class PatientAdmission(BaseModel):
-    mrn:          str   # medical record number
-    admission_ns: int   # earliest qualifying encounter start_time in Unix epoch ns
-                        # already verified to fall within the admission date range
-
-class CohortInput(BaseModel):
-    id:       int                      # cohort identifier
-    patients: list[PatientAdmission]   # pre-resolved patients for this cohort
-
-class AggregateStatisticsRequest(BaseModel):
-    cohorts:                list[CohortInput]   # one entry per cohort
-    measure:                MeasureIdentifier
-    observation_window:     int                 # window length in epoch ns, e.g. 24 h = 86_400_000_000_000
-    availability_threshold: float = 0.80        # fraction in [0, 1]
-```
-
-### Response
-
-```python
-class PatientResult(BaseModel):
-    mrn:  str     # patient identifier, carried through for export
-    mean: float   # mean of signal values over the observation window
-
-class CohortStatistics(BaseModel):
-    cohort_id:       int
-    n_candidates:    int                  # patients with a resolved patient_id
-    n_included:      int                  # patients that passed all filters
-    n_excluded:      int                  # all exclusions combined; detail in log file
-    patient_results: list[PatientResult]  # one entry per included patient
-
-class AggregateStatisticsResponse(BaseModel):
-    cohorts: list[CohortStatistics]
-```
-
-### FastAPI endpoint
+## 1. File Layout
 
 ```
-POST /cohort/statistics
-Body: AggregateStatisticsRequest
-Returns: AggregateStatisticsResponse
+atriumdb/sdk/
+├── atriumdb/
+│   ├── atrium_sdk.py                            ← MODIFIED: dashboard_compute_statistics()
+│   └── dashboard/
+│       ├── schemas.py                           ← NEW: request/response models
+│       └── statistics_resolver.py               ← NEW: the pipeline
+├── tests/
+│   ├── mock_api/
+│   │   ├── app.py                               ← MODIFIED: include_router(cohort_router, prefix="/cohorts")
+│   │   └── cohort_endpoints.py                  ← NEW: POST /cohorts/statistics handler
+│   ├── test_dashboard_api.py                    ← NEW: endpoint tests against a mocked SDK
+│   └── test_dashboard_statistics_real_data.py   ← NEW: real-dataset run, skipped without a dataset
+├── Dockerfile                                   ← NEW: Linux image for running the tests
+├── .dockerignore                                ← NEW
+├── docker-run-dataset.sh                        ← NEW: runs the image with a dataset mounted
+└── dockersetup.md                               ← NEW: Docker usage notes
 ```
 
 ---
 
-## Step 2 — Resolve Measure ID
+## 2. Schemas (`atriumdb/dashboard/schemas.py`)
 
-Before entering the patient loop, resolve the `MeasureIdentifier` from the request to an internal `measure_id` using `sdk.get_measure_id()`. This is done once and reused for every patient.
+All models inherit `_Base`, which sets `alias_generator=to_camel` and `populate_by_name=True` —
+snake_case in Python, camelCase in JSON.
 
-```python
-measure_id = sdk.get_measure_id(
-    request.measure.measure_tag,
-    freq=request.measure.freq,
-    units=request.measure.units,
-    freq_units=request.measure.freq_units,
-)
+### 2.1 Request
 
-if measure_id is None:
-    raise HTTPException(
-        status_code=404,
-        detail=f"Measure not found: tag='{request.measure.measure_tag}', "
-               f"freq={request.measure.freq} {request.measure.freq_units}, "
-               f"units='{request.measure.units}'",
-    )
-```
+| Model | Fields |
+|---|---|
+| `MeasureIdentifier` | `measure_tag: str`, `freq: float`, `units: str \| None`, `freq_units: str \| None` — passed straight to `sdk.get_measure_id()` |
+| `Admission` | `admission_ns: int`, `discharge_ns: int \| None`, `location: str \| None` |
+| `PatientAdmission` | `mrn: str`, `admissions: list[Admission]` |
+| `ValueRange` | `lower: float \| None`, `upper: float \| None` — either end may be open |
+| `ValueRangeMap` | `dict[str, ValueRange]`, keyed by measure tag |
+| `CohortInput` | `id: int`, `patients: list[PatientAdmission]`, `value_range: ValueRangeMap \| None` |
+| `AggregateStatisticsRequest` | `cohorts`, `measure`, `observation_window: PositiveInt \| "all_time"`, `availability_threshold: float = 0.80`, `value_range: ValueRangeMap \| None` |
 
-If `measure_id` is `None` the measure does not exist in the dataset and the request fails immediately with a 404 — there is no point proceeding to the patient loop.
+`observation_window` is `PositiveInt` rather than `int` because a zero-length window gives
+availability nothing to measure against.
 
-The resolved `measure_id` (and the `freq_nhz` looked up alongside it) are passed into Steps 3b and 4.
+`Admission` mirrors what the S1 resolver emits — including `location`, which S2 carries straight
+through to the response rather than re-running the `encounter → bed → unit` join.
 
----
+### 2.2 Response
 
-## Step 3 — Per-Cohort Processing
+| Model | Fields |
+|---|---|
+| `PatientResult` | `mrn`, `admission_ns`, `mean`, `sex \| None`, `age_months \| None`, `location \| None` |
+| `ExclusionRecord` | `mrn`, `admission_ns \| None`, `reason: ExclusionReason`, `window_start_ns \| None`, `window_end_ns \| None`, `availability \| None` |
+| `CohortStatistics` | `cohort_id`, `n_patients`, `n_visits`, `n_included`, `n_excluded`, `patient_results`, `exclusions` |
+| `AggregateStatisticsResponse` | `cohorts: list[CohortStatistics]` |
 
-With `measure_id` in hand, iterate through each cohort in `request.cohorts`. For each cohort, run the following substeps against its `patients` list and accumulate a `CohortStatistics` result.
+The three demographic fields on `PatientResult` feed the Data Records table and are best-effort:
+a dataset that does not record them leaves them `None` and the dashboard renders an em-dash.
+Missing demographics never exclude an entry.
 
-```python
-cohort_results = []
-all_included_means = []   # for overall statistics across all cohorts
+### 2.3 Counting semantics
 
-for cohort in request.cohorts:
-    cohort_stat = process_cohort(sdk, cohort, measure_id, freq_nhz, request)
-    cohort_results.append(cohort_stat)
-    all_included_means.extend(cohort_stat._included_means)  # internal, not serialised
-```
+| Counter | Meaning |
+|---|---|
+| `n_patients` | Distinct MRNs that resolved to a patient ID |
+| `n_visits` | `(patient, admission)` entries entering the pipeline — admissions of resolved patients only |
+| `n_included` | Entries that produced a `PatientResult` |
+| `n_excluded` | `len(exclusions)` — every entry dropped at any stage |
 
-### Exclusion logging
-
-Every time a patient is filtered out at any substep, write a structured entry to a dedicated log file (path configurable, e.g. `statistics_exclusions.log`). Each entry records enough context to diagnose the exclusion without re-running:
-
-```
-[EXCLUDED] cohort_id=1  mrn=123456  patient_id=42  reason=no_device_found
-           window=[1700000000000000000, 1700086400000000000]
-
-[EXCLUDED] cohort_id=1  mrn=234567  patient_id=None  reason=mrn_not_found
-
-[EXCLUDED] cohort_id=2  mrn=345678  patient_id=99  reason=below_availability_threshold
-           availability=0.61  threshold=0.80
-           window=[1700100000000000000, 1700186400000000000]
-```
-
-> **TODO — user-facing presentation:** decide whether exclusion details should also be surfaced in the API response (e.g. as an `exclusions` list per cohort) or remain log-only. During development, log-only is sufficient. Before production, consider whether the caller needs per-patient breakdown to audit results.
+Note that `mrn_not_found` exclusions are counted in `n_excluded` but are not in `n_visits`, since
+no admission was reached for them. `n_included + n_excluded` can therefore exceed `n_visits` when
+a cohort contains unresolvable MRNs. In practice the dashboard filters those out before calling
+S2, so the two normally agree.
 
 ---
 
-### Step 3a — Resolve Patient IDs
-
-For each MRN in the cohort, call `sdk.get_patient_id()` to retrieve the internal integer patient ID. MRNs that return `None` (patient not found in the dataset) are logged and skipped — they do not count toward `n_candidates`.
+## 3. SDK Method (`atriumdb/atrium_sdk.py`)
 
 ```python
-def resolve_patient_ids(sdk: AtriumSDK, mrn_list: list[str]) -> dict[str, int]:
-    """
-    Returns {mrn: patient_id} for every MRN that resolves successfully.
-    MRNs with no matching patient are logged and excluded from further processing.
-    """
-    result = {}
-    for mrn in mrn_list:
-        patient_id = sdk.get_patient_id(mrn=mrn)
-        if patient_id is None:
-            _log_exclusion(cohort_id=cohort_id, mrn=mrn, patient_id=None,
-                           reason="mrn_not_found")
-            continue
-        result[mrn] = patient_id
-    return result
+def dashboard_compute_statistics(self, request, request_id: str = "") -> AggregateStatisticsResponse:
+    if not request_id:
+        _LOGGER.error(...)
+        raise ValueError("request_id must be a non-empty string.")
+    return compute_aggregate_statistics(self, request, request_id)
 ```
 
-`n_candidates` for the cohort is set to `len(result)` — the number of MRNs that successfully resolved to a patient ID. MRNs that failed resolution are not counted.
+`request_id` is a correlation token: every log line and every exclusion record emitted while
+resolving the request is prefixed `[<request_id>]`, so a dashboard-side request can be matched
+against AtriumDB's logs. An empty value is rejected before any query runs.
+
+**Direct-DB only.** Unlike `dashboard_resolve_cohort`, this method has no
+`metadata_connection_type == "api"` branch — an API-mode SDK cannot call it. API-mode support is
+not implemented.
 
 ---
 
-### Step 3b — Compute Observation Window Per Patient
+## 4. Server Side
 
-With `patient_id` and `admission_ns` in hand for each patient, compute the observation window boundary:
-
-```python
-window_start_ns = admission_ns
-window_end_ns   = admission_ns + request.observation_window
-```
-
-Both bounds are in Unix epoch nanoseconds, consistent with all time fields in the database. The `observation_window` from the request is expressed directly in nanoseconds (e.g. 24 hours = `86_400_000_000_000`), so no unit conversion is needed.
-
-Each patient is now represented as:
+### 4.1 `tests/mock_api/cohort_endpoints.py`
 
 ```python
-{
-    "patient_id":      int,
-    "window_start_ns": int,   # == admission_ns
-    "window_end_ns":   int,   # == admission_ns + observation_window
-}
+@router.post("/statistics", response_model=AggregateStatisticsResponse)
+async def post_cohort_statistics(
+    request: AggregateStatisticsRequest,
+    x_request_id: str | None = Header(default=None),
+    sdk: AtriumSDK = Depends(get_sdk_instance),
+):
+    if not x_request_id:
+        raise HTTPException(status_code=400, detail="X-Request-ID header is required and must be non-empty.")
+    try:
+        return sdk.dashboard_compute_statistics(request, x_request_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
 ```
 
-This tuple is passed forward into Step 3c (device resolution) and Step 3d (availability check).
+The router is mounted with `prefix="/cohorts"` in `app.py`, so the full path is
+**`POST /cohorts/statistics`**.
+
+| Condition | Status |
+|---|---|
+| Success | 200 |
+| Missing or empty `X-Request-ID` | 400 |
+| Body fails schema validation | 422 (FastAPI) |
+| Requested measure not in the dataset | 422 (`ValueError` from the resolver) |
 
 ---
 
-### Step 3c — Resolve Device ID
+## 5. The Pipeline (`atriumdb/dashboard/statistics_resolver.py`)
 
-For each patient, call `sdk.convert_patient_to_device_id()` using the patient's `patient_id` and their observation window bounds:
+Entry point `compute_aggregate_statistics(sdk, request, request_id)` resolves the measure once,
+then processes each cohort independently.
 
-```python
-device_id = sdk.convert_patient_to_device_id(
-    start_time=window_start_ns,
-    end_time=window_end_ns,
-    patient_id=patient_id,
-)
-```
-
-The function returns a single `int` device ID only when **one device fully encapsulates the entire observation window**. It returns `None` in all other cases — no device found, or multiple devices cover the window with no single one spanning it completely.
-
-Patients where `device_id is None` are logged and excluded from further processing. They are counted in `n_excluded` together with all other exclusion reasons. The specific reason is captured in the log file — for now all exclusions are aggregated into a single counter; per-reason breakdown may be added later.
+### 5.1 Measure resolution
 
 ```python
-device_id = sdk.convert_patient_to_device_id(
-    start_time=window_start_ns,
-    end_time=window_end_ns,
-    patient_id=patient_id,
-)
-if device_id is None:
-    _log_exclusion(cohort_id=cohort_id, mrn=mrn, patient_id=patient_id,
-                   reason="no_device_found",
-                   window=(window_start_ns, window_end_ns))
-    n_excluded += 1
-    continue
+measure_id = sdk.get_measure_id(m.measure_tag, freq=m.freq, units=m.units, freq_units=m.freq_units)
 ```
 
-Patients that pass this step carry forward: `patient_id`, `device_id`, `window_start_ns`, `window_end_ns`.
+`None` means the measure does not exist, and the whole request fails with `ValueError` (→ 422)
+before any patient is touched. The resolved `measure_id` is reused for every entry; the tag,
+freq and units are **not** passed again to the later `get_interval_array` / `get_data` calls.
+
+### 5.2 Per-entry pipeline
+
+For each cohort: resolve the value range in force (§6), resolve MRNs, then walk every admission
+of every resolved patient.
+
+| Step | Action | Exclusion on failure |
+|---|---|---|
+| 3a | `sdk.get_patient_id(mrn=...)` for each patient | `mrn_not_found` (patient-level, no admission) |
+| 3b | Observation window for this admission (§5.3) | `missing_discharge_time` |
+| 3c | `sdk.convert_patient_to_device_id(start_time, end_time, patient_id)` | `no_device_found` |
+| 3d | Availability from `sdk.get_interval_array(measure_id, device_id, patient_id, start, end)` | `below_availability_threshold` |
+| 4 | Values from `sdk.get_data(...)`, NaN removal, optional bounds, mean | `no_usable_values` or `below_availability_threshold` |
+
+`convert_patient_to_device_id` returns an id only when **one device covers the whole window**; no
+device, or several devices with none spanning it, both yield `None` and the entry is dropped.
+
+Availability at step 3d is coverage-based:
+
+```python
+covered_ns = int(np.sum(interval_arr[:, 1] - interval_arr[:, 0]))   # 0 when the array is empty
+availability = covered_ns / (window_end_ns - window_start_ns)
+```
+
+### 5.3 Observation window
+
+```python
+if observation_window != "all_time":
+    return admission_ns, admission_ns + observation_window
+if discharge_ns is None or discharge_ns <= admission_ns:
+    return None                       # → missing_discharge_time
+return admission_ns, discharge_ns
+```
+
+Under `"all_time"` each admission is measured over its own stay. An open stay — or a discharge
+that does not follow the admission — has no bounded window to measure availability against, so
+the entry is excluded rather than guessed at. Admissions are handled independently: one
+admission of a patient can be scored while another is dropped.
+
+### 5.4 Value extraction and the mean
+
+With no bounds in force, the window is fetched normally (3-tuple return), NaN values are dropped,
+and the mean is taken over what remains. An empty array after NaN removal yields
+`no_usable_values`.
+
+With bounds in force, the call changes shape:
+
+```python
+_, values = sdk.get_data(..., return_nan_filled=True)   # 2-tuple when NaN-filled
+usable = ~np.isnan(values)
+if lower is not None: usable &= values >= lower
+if upper is not None: usable &= values <= upper
+availability = np.count_nonzero(usable) / len(values)
+```
+
+`return_nan_filled=True` makes `get_data` return every sample slot the measure's frequency
+implies, with gaps as NaN — and it returns a 2-tuple rather than the usual 3.
+
+**Why availability is recomputed here.** Out-of-range samples are treated as *absent*, not merely
+skipped. `get_interval_array` is value-blind: it knows how much data exists, not how much of it
+falls inside the bounds. Without this second check, an admission whose signal sat mostly outside
+the plausible range would pass step 3d and produce a confident-looking mean from a handful of
+samples. Failing it as `below_availability_threshold` — with the recomputed fraction attached to
+the exclusion record — is the honest outcome.
+
+### 5.5 Demographics
+
+Fetched only for entries that survived every filter, since they exist purely to populate the
+results table:
+
+```python
+info = sdk.get_patient_info(patient_id=patient_id, time=admission_ns)
+sex = info.get("gender") or None
+age_months = _age_months(info["dob"], admission_ns)
+```
+
+`_age_months` counts calendar months from dob to admission — `(years * 12) + months`, minus one
+if the day of the month has not been reached — so a 3y 4m old is `40`. Counting on the calendar
+rather than dividing a nanosecond span avoids month-length drift. A dob after the admission
+indicates an inconsistent record and yields `None` rather than a negative age.
+
+`location` is not queried at all: it comes from the `Admission` the caller supplied.
 
 ---
 
-### Step 3d — Data Availability Check
+## 6. Value Range Resolution
 
-Call `sdk.get_interval_array()` to retrieve the continuous intervals of available data for this patient's device and measure within the observation window. The return value is a 2D numpy array where each row is `[interval_start_ns, interval_end_ns]`.
+Both `value_range` maps are keyed by measure tag, and **only the tag named by the request's
+`measure` is consulted** — bounds keyed by any other tag are ignored.
 
-```python
-interval_arr = sdk.get_interval_array(
-    measure_id=measure_id,
-    device_id=device_id,
-    patient_id=patient_id,
-    measure_tag=request.measure.measure_tag,
-    freq=request.measure.freq,
-    units=request.measure.units,
-    freq_units=request.measure.freq_units,
-    start=window_start_ns,
-    end=window_end_ns,
-)
-```
-
-Sum the covered nanoseconds across all intervals and compute the availability fraction against the full observation window:
+When both the cohort and the request bound that tag, the two are **intersected** rather than one
+replacing the other. The tighter bound wins at each end independently:
 
 ```python
-if interval_arr is None or len(interval_arr) == 0:
-    covered_ns = 0
-else:
-    covered_ns = int(np.sum(interval_arr[:, 1] - interval_arr[:, 0]))
-
-observation_window_ns = window_end_ns - window_start_ns
-availability = covered_ns / observation_window_ns
+lower = max(all supplied lowers)    # highest floor
+upper = min(all supplied uppers)    # lowest ceiling
 ```
 
-Compare against the threshold and exclude if below:
-
-```python
-if availability < request.availability_threshold:
-    _log_exclusion(cohort_id=cohort_id, mrn=mrn, patient_id=patient_id,
-                   reason="below_availability_threshold",
-                   window=(window_start_ns, window_end_ns),
-                   availability=availability,
-                   threshold=request.availability_threshold)
-    n_excluded += 1
-    continue
-```
-
-Patients that pass carry forward: `patient_id`, `device_id`, `window_start_ns`, `window_end_ns` into Step 4 (value extraction and per-patient statistics).
+So a cohort can narrow the global range but never widen it. An end left open (`None`) constrains
+nothing, so the other side's bound carries. When only one of the two maps has an entry it applies
+alone; when neither does, the signal is unbounded and step 5.4 takes the simple path.
 
 ---
 
-## Step 4 — Per-Patient Value Extraction and Statistics
+## 7. Exclusions
 
-For each patient that passed the availability check, call `sdk.get_data()` to retrieve the raw signal values within the observation window. The third element of the return tuple is the 1D numpy value array.
+`ExclusionReason` is a string enum with five values: `mrn_not_found`, `no_device_found`,
+`below_availability_threshold`, `no_usable_values`, `missing_discharge_time`.
 
-```python
-_, _, values = sdk.get_data(
-    measure_id=measure_id,
-    device_id=device_id,
-    patient_id=patient_id,
-    start_time_n=window_start_ns,
-    end_time_n=window_end_ns,
-    measure_tag=request.measure.measure_tag,
-    freq=request.measure.freq,
-    units=request.measure.units,
-    freq_units=request.measure.freq_units,
-)
+Every dropped entry is recorded twice — once as an `ExclusionRecord` in the response, and once as
+a log line:
+
+```
+[<request_id>]  [EXCLUDED] cohort_id=1  mrn=<MRN>  reason=below_availability_threshold  admission_ns=…  window=[…, …]  availability=0.6100
 ```
 
-Drop any `NaN` values that may be present, then compute per-patient statistics:
+Optional fields are omitted from the line when they do not apply: `admission_ns` and `window` are
+absent for `mrn_not_found`, `window` is absent for `missing_discharge_time`, and `availability`
+appears only for `below_availability_threshold`.
 
-```python
-values = values[~np.isnan(values)]
-
-if len(values) == 0:
-    _log_exclusion(cohort_id=cohort_id, mrn=mrn, patient_id=patient_id,
-                   reason="empty_values_after_nan_drop",
-                   window=(window_start_ns, window_end_ns))
-    n_excluded += 1
-    continue
-
-patient_mean = float(np.mean(values))
-# patient_median = float(np.median(values))
-# patient_sd     = float(np.std(values, ddof=1)) if len(values) > 1 else None
-
-included_means.append(patient_mean)
-```
-
-`included_means` accumulates one mean per included patient in this cohort.
+Records go to a **child logger**, `atriumdb.dashboard.statistics_resolver.exclusions`, at WARNING
+level. Attaching a `FileHandler` to that logger routes them to a dedicated file without mixing
+them into general debug output; no file path is hardcoded.
 
 ---
 
-## Step 5 — Cohort Output Assembly
+## 8. Tests
 
-After all patients in the cohort have been processed, build the `CohortStatistics` object directly from the accumulated `patient_results` list — no aggregation needed here:
+### 8.1 `tests/test_dashboard_api.py` — endpoint tests against a mocked SDK
 
-```python
-cohort_stat = CohortStatistics(
-    cohort_id=cohort.id,
-    n_candidates=n_candidates,
-    n_included=len(patient_results),
-    n_excluded=n_excluded,
-    patient_results=patient_results,
-)
+Every test drives the real HTTP endpoint; only the SDK underneath is mocked, so schema
+serialisation, header handling and status codes are all exercised for real.
+
+- A module-scoped autouse fixture starts one uvicorn server on port **8124** and probes the socket
+  until it accepts connections (10 s deadline) rather than sleeping a fixed interval.
+- A second autouse fixture clears `app.dependency_overrides` after every test, so an SDK injected
+  by one test cannot silently serve the next.
+- `_mock_sdk(...)` builds a stand-in with configurable `get_measure_id`, `get_patient_id`,
+  `convert_patient_to_device_id`, `get_interval_array`, `get_data` and `get_patient_info`, which
+  lets each case target one pipeline stage without a dataset or the native library.
+
+Coverage by group:
+
+| Group | Cases |
+|---|---|
+| Happy path | single entry included; missing demographics do not exclude; two patients get independent means; multiple admissions scored separately |
+| Exclusions | each of the five reasons, asserting the reason, window bounds and availability carried on the record |
+| Value range | lower-only, upper-only, both bounds with NaN, out-of-range values reducing availability, global ∩ cohort intersection, a cohort failing to widen the global range, bounds keyed by another tag being ignored |
+| `all_time` | open stay excluded; discharge not after admission excluded; mixed admissions where one is scored and one dropped |
+| Contract | missing `X-Request-ID` → 400; unknown measure → 422 |
+
+### 8.2 `tests/test_dashboard_statistics_real_data.py` — real dataset
+
+Runs the pipeline end-to-end through `sdk.dashboard_compute_statistics` against a mounted
+AtriumDB dataset, skipped automatically when `ATRIUMDB_DATASET_LOCATION` is unset.
+
+Cohort membership, admission timestamps, the measure identifier, the window and the threshold are
+all module-level constants at the top of the file — fill them in for the dataset in hand. The
+assertion is deliberately loose (the response is non-empty); the value of the test is the
+artefact it writes: the full JSON response goes to `cohort_stats_real_data.log`, and a per-cohort
+summary of included and excluded entries is printed to stdout under `-v -s`.
+
+### 8.3 Running the tests
+
+Both live behind Docker, because `AtriumSDK.__init__` refuses to construct on macOS:
+
+```bash
+# Build once, from sdk/
+docker build -t atriumdb-sdk .
+
+# Endpoint tests (no dataset needed)
+docker run --rm -it -v "$(pwd):/sdk" atriumdb-sdk \
+  python -m pytest tests/test_dashboard_api.py -v
+
+# Real-dataset run
+./docker-run-dataset.sh python -m pytest \
+  tests/test_dashboard_statistics_real_data.py -v -s
 ```
 
-Append to `cohort_results` and move on to the next cohort.
+See `dockersetup.md` for the full Docker workflow.
 
 ---
 
-## Step 6 — Assemble Final Response
+## 9. Notes
 
-After all cohorts are processed, return the response directly — all aggregation is left to the client:
+**Choice of summary statistic.** `PatientResult.mean` is `np.mean` over the usable samples in the
+window. Mean is the conventional choice for cohort-level physiological signal analysis; if the
+signal proves prone to artefact spikes, median would be more robust and could be parameterised on
+the request. The dashboard receives per-entry values rather than pre-aggregated statistics
+precisely so that this choice does not have to be final for anything computed downstream.
 
-```python
-return AggregateStatisticsResponse(cohorts=cohort_results)
-```
-
----
-
-## Notes
-
-> **Per-patient summary statistic:** for now, `PatientResult.mean` is computed as `np.mean(values)` over all signal samples within the observation window. Mean is the conventional choice for cohort-level physiological signal analysis. If the signal is prone to artefact spikes, median may be more appropriate — this can be parameterised in a future iteration.
+**API mode.** `dashboard_compute_statistics` is direct-DB only. If the dashboard ever needs to
+call an AtriumDB server over HTTP rather than embedding the SDK, this method needs the same
+`metadata_connection_type == "api"` branch that `dashboard_resolve_cohort` has.
