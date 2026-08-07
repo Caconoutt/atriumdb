@@ -5410,8 +5410,6 @@ of DatasetIterator objects depending on the value of num_iterators.
         them in a file, attach a ``FileHandler`` to that logger before calling
         this method.
 
-        Only supported in direct-DB mode. API-mode support is not yet implemented.
-
         :param request: An
             :class:`~atriumdb.dashboard.schemas.AggregateStatisticsRequest`
             containing the cohort list, measure identifier, observation window
