@@ -265,28 +265,15 @@ def _resolve_demographic_cohort(
         qualifying visit admission timestamps (sorted ascending). May be empty
         if no patients matched.
     """
-    # Stage 1 — location + date filter
-    #
-    # DemographicCohort validates its location codes against LOCATION_LOOKUP,
-    # so an unknown code is already a 422 by the time a request reaches here.
-    # This guard remains for a caller that built the cohort by some other
-    # route; reaching it means the boundary check was bypassed, so the error
-    # propagates rather than being swallowed.
-    try:
-        encounter_rows = query_patient_encounters(
-            sdk,
-            locations=cohort.location,
-            admit_start_ns=admission_date_range.start,
-            admit_end_ns=admission_date_range.end,
-        )
-    except ValueError as exc:
-        _LOGGER.error(
-            "[%s] Demographic Cohort Definition — cohort %r: %s",
-            request_id,
-            cohort.id,
-            exc,
-        )
-        raise
+    # Stage 1 — location + date filter. DemographicCohort validates its
+    # location codes against LOCATION_LOOKUP, so an unknown code is rejected at
+    # the request boundary and never reaches here.
+    encounter_rows = query_patient_encounters(
+        sdk,
+        locations=cohort.location,
+        admit_start_ns=admission_date_range.start,
+        admit_end_ns=admission_date_range.end,
+    )
 
     admission_records = group_encounters_by_admission(encounter_rows)
 
