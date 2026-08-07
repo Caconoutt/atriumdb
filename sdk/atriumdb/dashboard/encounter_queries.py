@@ -19,18 +19,19 @@
 
 This module provides two things:
 
-1. ``LOCATION_LOOKUP`` — translates API location codes (e.g. ``"ICU"``) to
-   the exact ``unit.name`` strings stored in the database.
-
-2. ``query_patient_encounters`` — translates location codes then delegates
+1. ``query_patient_encounters`` — translates location codes then delegates
    the actual JOIN query (``encounter → bed → unit``) to
    :meth:`~atriumdb.sql_handler.sql_handler.SQLHandler.select_patient_encounters`,
    which is implemented by both ``SQLiteHandler`` and ``MariaDBHandler``.
    Only runs in direct-DB mode (``metadata_connection_type`` of
    ``"sqlite"``, ``"mysql"``, or ``"mariadb"``).
 
-3. ``group_encounters_by_admission`` — pure Python; collapses per-``encounter``
+2. ``group_encounters_by_admission`` — pure Python; collapses per-``encounter``
    rows from the SQL handler into per-visit admission records.
+
+The location code vocabulary itself lives in
+:mod:`atriumdb.dashboard.locations`, so that the request schema can reject
+unknown codes without importing this module.
 """
 
 from __future__ import annotations
@@ -38,18 +39,18 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from atriumdb.dashboard.locations import LOCATION_LOOKUP, resolve_location_codes
+
 if TYPE_CHECKING:
     from atriumdb import AtriumSDK
 
 _LOGGER = logging.getLogger(__name__)
 
-# Maps API location codes to the exact strings stored in unit.name.
-# Filtering is performed against unit.name (not unit.type).
-# Populate by running: SELECT DISTINCT name FROM unit;
-LOCATION_LOOKUP: dict[str, list[str]] = {
-    "ICU": ["ICU"],
-    "OR": ["OR"],
-}
+__all__ = [
+    "LOCATION_LOOKUP",
+    "group_encounters_by_admission",
+    "query_patient_encounters",
+]
 
 
 def query_patient_encounters(
@@ -62,7 +63,8 @@ def query_patient_encounters(
     """Query encounters joined to bed and unit for dashboard cohort resolution.
 
     Translates API location codes to ``unit.name`` values via
-    ``LOCATION_LOOKUP``, then delegates the actual SQL to
+    :func:`~atriumdb.dashboard.locations.resolve_location_codes`, then
+    delegates the actual SQL to
     :meth:`~atriumdb.sql_handler.sql_handler.SQLHandler.select_patient_encounters`
     which is implemented by both ``SQLiteHandler`` and ``MariaDBHandler``.
 
@@ -92,18 +94,13 @@ def query_patient_encounters(
                 "start_time_ns": int,
                 "end_time_ns":   int | None,
             }
-    :raises ValueError: If a location code is not present in ``LOCATION_LOOKUP``.
+    :raises ValueError: If a location code is not present in
+        ``LOCATION_LOOKUP``. Requests arriving over HTTP are rejected with a
+        422 by the schema before reaching here, so this indicates a direct
+        caller that bypassed
+        :class:`~atriumdb.dashboard.schemas.DemographicCohort`.
     """
-    unit_name_list = None
-    if locations:
-        unit_name_list = []
-        for code in locations:
-            if code not in LOCATION_LOOKUP:
-                raise ValueError(
-                    f"Unknown location code {code!r}. "
-                    f"Valid codes are: {list(LOCATION_LOOKUP)}"
-                )
-            unit_name_list.extend(LOCATION_LOOKUP[code])
+    unit_name_list = resolve_location_codes(locations) if locations else None
 
     rows = sdk.sql_handler.select_patient_encounters(
         patient_id_list=patient_id_list,

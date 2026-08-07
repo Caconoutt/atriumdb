@@ -19,7 +19,10 @@ import time
 import threading
 from pathlib import Path
 
+import pytest
+import requests
 import uvicorn
+from pydantic import ValidationError
 
 from atriumdb.atrium_sdk import AtriumSDK
 from atriumdb.dashboard.schemas import (
@@ -169,4 +172,122 @@ def _test_api_cohorts(db_type, dataset_location, connection_params):
     assert cohorts_by_id["male_icu"] == {"MRN001"}
     assert cohorts_by_id["female_icu"] == {"MRN002"}
 
+    _test_invalid_input_is_rejected(date_range)
+
     api_sdk.close()
+
+
+def test_cohort_request_validation():
+    """Invalid cohort input is rejected when the request model is built.
+
+    This is the check that a direct-DB caller and the API-mode SDK client both
+    hit, before any database or HTTP work happens. It needs no dataset, so it
+    runs independently of :func:`test_api_cohorts`. The matching HTTP status
+    codes are asserted in :func:`_test_invalid_input_is_rejected`.
+    """
+    with pytest.raises(ValidationError, match="Unknown location code"):
+        DemographicCohort(id="bad_loc", location=["ICU", "ER"])
+
+    with pytest.raises(ValidationError, match="Unknown sex code"):
+        DemographicCohort(id="bad_sex", location=["ICU"], sex=["X"])
+
+    # only M and F are requestable — there is no code for unknown sex
+    with pytest.raises(ValidationError, match="Unknown sex code"):
+        DemographicCohort(id="unknown_sex", sex=["U"])
+
+    with pytest.raises(ValidationError, match="must not be after"):
+        AdmissionDateRange(start=200, end=100)
+
+    # sex codes are case-insensitive and normalised, not rejected
+    assert DemographicCohort(id="lower_sex", sex=["m", " f "]).sex == ["M", "F"]
+
+    # valid input still passes, including a single-instant date range
+    assert DemographicCohort(id="ok", location=["ICU", "OR"]).location == ["ICU", "OR"]
+    assert AdmissionDateRange(start=100, end=100).end == 100
+
+    # unfiltered cohorts remain valid — None means "no filter", not "invalid"
+    unfiltered = DemographicCohort(id="ok")
+    assert unfiltered.location is None and unfiltered.sex is None
+
+    # the same rejection applies when parsed from camelCase JSON, which is the
+    # form FastAPI hands the model
+    with pytest.raises(ValidationError, match="Unknown location code"):
+        CohortDefinitionRequest.model_validate({
+            "type": "demographic",
+            "admissionDateRange": {"start": 1, "end": 2},
+            "cohorts": [{"id": "c", "location": ["ER"]}],
+        })
+
+
+def _test_invalid_input_is_rejected(date_range):
+    """Bad user input must surface as a 422 over HTTP, never as a 500.
+
+    :func:`test_cohort_request_validation` covers the model-construction side;
+    this covers the status code the dashboard server actually receives, which
+    only a live request can show.
+    """
+    print("Testing input validation over HTTP...")
+
+    base_url = "http://127.0.0.1:8123"
+    valid_body = CohortDefinitionRequest(
+        type="demographic",
+        admission_date_range=date_range,
+        cohorts=[DemographicCohort(id="cohort_1b_loc", location=["ICU"])],
+    ).model_dump(by_alias=True)
+
+    # sanity check: the unmodified body and header pair is accepted
+    response = requests.post(
+        f"{base_url}/cohorts", json=valid_body, headers={"X-Request-ID": "test-valid"}
+    )
+    assert response.status_code == 200, response.text
+
+    bad_location_body = {
+        **valid_body,
+        "cohorts": [{"id": "bad_loc", "location": ["ER"]}],
+    }
+    response = requests.post(
+        f"{base_url}/cohorts",
+        json=bad_location_body,
+        headers={"X-Request-ID": "test-bad-location"},
+    )
+    assert response.status_code == 422, response.text
+    assert "Unknown location code" in response.text
+
+    bad_sex_body = {
+        **valid_body,
+        "cohorts": [{"id": "bad_sex", "location": ["ICU"], "sex": ["X"]}],
+    }
+    response = requests.post(
+        f"{base_url}/cohorts",
+        json=bad_sex_body,
+        headers={"X-Request-ID": "test-bad-sex"},
+    )
+    assert response.status_code == 422, response.text
+    assert "Unknown sex code" in response.text
+
+    inverted_range_body = {
+        **valid_body,
+        "admissionDateRange": {"start": date_range.end, "end": date_range.start},
+    }
+    response = requests.post(
+        f"{base_url}/cohorts",
+        json=inverted_range_body,
+        headers={"X-Request-ID": "test-inverted-range"},
+    )
+    assert response.status_code == 422, response.text
+    assert "must not be after" in response.text
+
+    print("Testing input validation: blank X-Request-ID header...")
+
+    # min_length=1 alone lets an all-whitespace header through, which used to
+    # reach the SDK's own request_id check and surface as a 500
+    for bad_request_id in ("", "   "):
+        response = requests.post(
+            f"{base_url}/cohorts",
+            json=valid_body,
+            headers={"X-Request-ID": bad_request_id},
+        )
+        assert response.status_code == 422, (
+            f"X-Request-ID={bad_request_id!r} returned "
+            f"{response.status_code}: {response.text}"
+        )

@@ -27,7 +27,7 @@ router = APIRouter()
 @router.post("", response_model=MrnCohortResponse)
 async def post_cohorts(
     body: CohortDefinitionRequest,
-    x_request_id: str = Header(..., min_length=1),
+    x_request_id: str = Header(..., min_length=1, pattern=r"\S"),
     sdk: AtriumSDK = Depends(get_sdk_instance),
 ) -> MrnCohortResponse:
     """Resolve cohort definitions into validated MRN lists.
@@ -41,8 +41,10 @@ async def post_cohorts(
     :param body: Parsed request body containing the cohort type, the shared
         ``admissionDateRange``, and one or more cohort definitions.
     :param x_request_id: Required ``X-Request-ID`` header for log correlation,
-        echoed back in the response ``requestId`` field. A missing or empty
-        header is rejected with a 422 before any query runs.
+        echoed back in the response ``requestId`` field. A missing, empty, or
+        all-whitespace header is rejected with a 422 before any query runs —
+        the ``\\S`` pattern is what covers the whitespace-only case, which
+        ``min_length`` alone lets through.
     :param sdk: AtriumSDK instance injected by ``get_sdk_instance``.
     :return: :class:`~atriumdb.dashboard.schemas.MrnCohortResponse` with one
         resolved cohort per input cohort.

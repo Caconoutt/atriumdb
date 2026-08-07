@@ -168,7 +168,7 @@ input.
 | Constant | Role |
 |---|---|
 | `DEMO_ADMIT_START_NS` / `DEMO_ADMIT_END_NS` | The admission window. |
-| `DEMOGRAPHIC_COHORTS` | List of `DemographicCohort` objects to run. Available filters: `sex`, `age` (list of `AgeBand` in nanoseconds), `location` (API codes resolved via `LOCATION_LOOKUP` in `encounter_queries.py`). |
+| `DEMOGRAPHIC_COHORTS` | List of `DemographicCohort` objects to run. Available filters: `sex`, `age` (list of `AgeBand` in nanoseconds), `location` (API codes resolved via `LOCATION_LOOKUP` in `locations.py`). |
 | `EXPECTED_DEMOGRAPHIC_COHORTS` | `cohort_id → set of MRNs`. |
 | `EXPECTED_DEMOGRAPHIC_ADMISSIONS` | `cohort_id → {mrn: [Admission, ...]}`. Compares full `Admission` models, so `admission_ns`, `discharge_ns` **and** `location` must all match. |
 
@@ -318,4 +318,4 @@ if you want it printed.
 | `OperationalError: attempt to write a readonly database` | Dataset mounted `:ro` | Remove `:ro` from the mount line in `docker-run-dataset.sh` |
 | `KeyError` on a cohort id | Cohort id in an `EXPECTED_*` dict but not in `MRN_COHORTS` / `DEMOGRAPHIC_COHORTS` | Keep the two in sync — the expected dicts are indexed by the resolved results |
 | Expected MRN set doesn't match | Test window doesn't cover encounter start_times | Check setup script output for `ADMIT_START_NS`/`ADMIT_END_NS` and update the window constants |
-| `ValueError: Unknown location code` | Location code not in `LOCATION_LOOKUP` | Add it to `LOCATION_LOOKUP` in `encounter_queries.py`, matching the exact `unit.name` in the DB |
+| `ValidationError` / HTTP 422 `Unknown location code(s)` | Location code not in `LOCATION_LOOKUP` | Add it to `LOCATION_LOOKUP` in `locations.py`, matching the exact `unit.name` in the DB |

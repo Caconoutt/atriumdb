@@ -245,8 +245,9 @@ def _resolve_demographic_cohort(
 
         Only visits where the age filter passes are included in the patient's
         ``admissions`` list. Patients with ``dob = None`` are excluded from
-        all visits when an age filter is supplied. Sex ``"U"`` matches NULL,
-        empty, or the literal ``'U'`` stored in ``patient.gender``.
+        all visits when an age filter is supplied. Sex accepts only ``"M"``
+        and ``"F"``, so a patient whose ``patient.gender`` is NULL, empty, or
+        ``'U'`` is excluded whenever a sex filter is present.
 
     All active filters are AND-ed; within each filter the individual values
     are OR-ed (e.g. ``sex=["F","U"]`` keeps female *or* unknown patients).
@@ -265,6 +266,12 @@ def _resolve_demographic_cohort(
         if no patients matched.
     """
     # Stage 1 — location + date filter
+    #
+    # DemographicCohort validates its location codes against LOCATION_LOOKUP,
+    # so an unknown code is already a 422 by the time a request reaches here.
+    # This guard remains for a caller that built the cohort by some other
+    # route; reaching it means the boundary check was bypassed, so the error
+    # propagates rather than being swallowed.
     try:
         encounter_rows = query_patient_encounters(
             sdk,
@@ -321,16 +328,14 @@ def _resolve_demographic_cohort(
             patients_without_mrn.append(pid)
             continue
 
-        # Sex filter: patient-level, not visit-level
+        # Sex filter: patient-level, not visit-level. Only "M" and "F" are
+        # requestable, so a patient whose gender is NULL, empty, or the "U"
+        # unknown marker normalises to a value matching neither and is dropped.
+        # cohort.sex is already upper-cased by DemographicCohort's validator.
         sex_ok = True
         if cohort.sex:
-            requested = {s.upper() for s in cohort.sex}
-            gender_raw = demo.get("gender")
-            if gender_raw is None or gender_raw.strip() == "":
-                sex_ok = "U" in requested
-            else:
-                g = gender_raw.strip().upper()
-                sex_ok = g in requested or (g == "U" and "U" in requested)
+            gender = (demo.get("gender") or "").strip().upper()
+            sex_ok = gender in set(cohort.sex)
 
         if not sex_ok:
             continue

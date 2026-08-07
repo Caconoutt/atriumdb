@@ -19,8 +19,15 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from pydantic.alias_generators import to_camel
+
+from atriumdb.dashboard.locations import LOCATION_LOOKUP
+
+#: Sex codes accepted in a demographic cohort filter. A patient whose
+#: ``patient.gender`` is NULL, empty, or the ``'U'`` unknown marker cannot match
+#: either code, so such patients are excluded whenever a sex filter is applied.
+VALID_SEX_CODES: tuple[str, ...] = ("M", "F")
 
 
 class _Base(BaseModel):
@@ -41,6 +48,22 @@ class AdmissionDateRange(_Base):
 
     start: int
     end: int
+
+    @model_validator(mode="after")
+    def _start_not_after_end(self) -> "AdmissionDateRange":
+        """Reject an inverted window.
+
+        ``start > end`` describes an empty interval, so every cohort in the
+        request would resolve to zero patients. That is indistinguishable from
+        a genuine no-match result, so it is rejected at the boundary rather
+        than returned as an empty response.
+        """
+        if self.start > self.end:
+            raise ValueError(
+                f"admissionDateRange.start ({self.start}) must not be after "
+                f"admissionDateRange.end ({self.end})."
+            )
+        return self
 
 
 class Admission(_Base):
@@ -122,12 +145,16 @@ class DemographicCohort(_Base):
         the patient's reference admission time (earliest in-range admit), not
         the current date. Patients with an unknown ``dob`` are excluded when
         this filter is present.
-    :param sex: Optional list of sex codes. ``"M"`` and ``"F"`` match their
-        stored ``patient.gender`` values directly. ``"U"`` matches NULL, empty,
-        or the literal ``'U'`` stored in ``patient.gender``.
+    :param sex: Optional list of sex codes, one of ``VALID_SEX_CODES``
+        (``"M"`` or ``"F"``). Accepted case-insensitively and normalised to
+        upper case; each matches its stored ``patient.gender`` value directly.
+        There is no code for unknown sex, so a patient whose ``gender`` is
+        NULL, empty, or ``'U'`` is excluded whenever this filter is present.
+        An unrecognised code is rejected rather than silently matching no one.
     :param location: Optional list of API location codes (e.g. ``["ICU"]``).
-        Resolved server-side via ``LOCATION_LOOKUP`` against ``unit.name``.
-        ``None`` means no location filter — all admitted patients qualify.
+        Validated against ``LOCATION_LOOKUP`` here, then resolved to
+        ``unit.name`` values at query time. ``None`` means no location filter —
+        all admitted patients qualify.
     :param value_range: Reserved for future vital-sign range filtering; unused
         in Priority 1B.
     """
@@ -137,6 +164,47 @@ class DemographicCohort(_Base):
     sex: list[str] | None = None
     location: list[str] | None = None
     value_range: dict | None = None
+
+    @field_validator("location")
+    @classmethod
+    def _known_location_codes(cls, value: list[str] | None) -> list[str] | None:
+        """Reject location codes absent from ``LOCATION_LOOKUP``.
+
+        Checking here rather than at query time is what turns an unknown code
+        into a 422 naming the offending element, instead of a ``ValueError``
+        surfacing from
+        :func:`~atriumdb.dashboard.encounter_queries.query_patient_encounters`
+        as a 500.
+        """
+        if value is None:
+            return None
+        unknown = [code for code in value if code not in LOCATION_LOOKUP]
+        if unknown:
+            raise ValueError(
+                f"Unknown location code(s) {unknown}. "
+                f"Valid codes are: {list(LOCATION_LOOKUP)}"
+            )
+        return value
+
+    @field_validator("sex")
+    @classmethod
+    def _known_sex_codes(cls, value: list[str] | None) -> list[str] | None:
+        """Normalise sex codes to upper case and reject unrecognised ones.
+
+        Without this an unrecognised code such as ``"X"`` matches no patient
+        and the cohort resolves empty, which the caller cannot tell apart from
+        a filter that genuinely matched no one.
+        """
+        if value is None:
+            return None
+        normalised = [code.strip().upper() for code in value]
+        unknown = [code for code in normalised if code not in VALID_SEX_CODES]
+        if unknown:
+            raise ValueError(
+                f"Unknown sex code(s) {unknown}. "
+                f"Valid codes are: {list(VALID_SEX_CODES)}"
+            )
+        return normalised
 
 
 class CohortDefinitionRequest(_Base):

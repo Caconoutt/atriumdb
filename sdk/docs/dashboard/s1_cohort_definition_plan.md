@@ -51,7 +51,8 @@ atriumdb/sdk/
 │   └── dashboard/                           ← NEW package — pure logic, no FastAPI
 │       ├── __init__.py
 │       ├── schemas.py                       ← Pydantic request/response models
-│       ├── encounter_queries.py             ← LOCATION_LOOKUP + query_patient_encounters + group_encounters_by_admission
+│       ├── locations.py                     ← LOCATION_LOOKUP + resolve_location_codes
+│       ├── encounter_queries.py             ← query_patient_encounters + group_encounters_by_admission
 │       └── cohort_resolver.py               ← resolve_cohorts_local, _resolve_mrn_cohort, _resolve_demographic_cohort
 ├── tests/
 │   ├── mock_api/
@@ -173,12 +174,14 @@ applied when it is not `None` **and**, for the list arguments, non-empty: passin
 
 ## 4. Dashboard Layer (`atriumdb/dashboard/`)
 
-### 4.1 `encounter_queries.py`
+### 4.1 `locations.py` and `encounter_queries.py`
 
-Two functions and one lookup table. Contains no raw SQL — delegates to `sql_handler`.
+`encounter_queries.py` holds two functions and contains no raw SQL — it delegates to
+`sql_handler`. The location vocabulary lives in `locations.py` so that `schemas.py` can
+validate location codes at the request boundary without importing the query layer.
 
-**`LOCATION_LOOKUP`** — maps API location codes to exact `unit.name` values in the DB.
-Filter is on `unit.name`, not `unit.type`.
+**`LOCATION_LOOKUP`** (in `locations.py`) — maps API location codes to exact `unit.name`
+values in the DB. Filter is on `unit.name`, not `unit.type`.
 
 ```python
 LOCATION_LOOKUP: dict[str, list[str]] = {
@@ -188,8 +191,8 @@ LOCATION_LOOKUP: dict[str, list[str]] = {
 ```
 
 **`query_patient_encounters(sdk, patient_id_list, admit_start_ns, admit_end_ns, locations)`**
-— translates `locations` (API codes) to `unit_name_list` via `LOCATION_LOOKUP`, raising
-`ValueError` on an unknown code, then calls
+— translates `locations` (API codes) to `unit_name_list` via `resolve_location_codes`,
+raising `ValueError` on an unknown code, then calls
 `sdk.sql_handler.select_patient_encounters(...)`. Returns one dict per **encounter row**:
 
 ```python
@@ -252,10 +255,10 @@ with no qualifying patients is still returned, with an empty `patients` list.
 
 | Step | Action |
 |---|---|
-| 1 | `query_patient_encounters(sdk, locations=..., admit_start_ns=..., admit_end_ns=...)`; an unknown location code is logged and re-raised |
+| 1 | `query_patient_encounters(sdk, locations=..., admit_start_ns=..., admit_end_ns=...)`; location codes are already validated by `DemographicCohort`, so an unknown code is a 422 before this runs |
 | 1b | `group_encounters_by_admission(...)` → all admissions kept per patient, grouped by `(visit_number, unit_name)` |
 | 2 | `sdk.sql_handler.select_all_patients_in_list(patient_id_list=...)` for demographics; candidates with no MRN on record are logged and dropped |
-| 3 | Sex filter — **patient level**: `"U"` matches NULL / empty / `'U'` in `patient.gender` |
+| 3 | Sex filter — **patient level**: only `"M"` and `"F"` are requestable, so NULL / empty / `'U'` in `patient.gender` matches neither and is dropped |
 | 3b | Age filter — **per admission**: `band.start_ns <= (admit_time_ns - dob_ns) <= band.end_ns`. Patients with no `dob` fail every band when an age filter is present |
 | 4 | Keep the patient if at least one admission passed; return only the admissions that passed, sorted by `admission_ns` |
 
