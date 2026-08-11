@@ -39,8 +39,8 @@ SQL = """
     SELECT p.*, e.start_time
     FROM encounter e
     JOIN patient p ON e.patient_id = p.id
-    WHERE e.start_time >= 1577836800000000000
-      AND e.start_time <= 1609459200000000000
+    WHERE e.start_time >= ?
+      AND e.start_time <= ?
 """
 
 PARAMS = (YEAR_2020, YEAR_2021)
