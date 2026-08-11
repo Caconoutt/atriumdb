@@ -25,6 +25,9 @@ YEAR_2024 = 1704067200000000000
 YEAR_2025 = 1735689600000000000
 YEAR_2026 = 1767225600000000000
 
+min_age_ns = 2 * YEAR_NS
+max_age_ns = 5 * YEAR_NS
+
 def to_ns(date_str: str) -> int:
     """'2020-01-01' or '2020-01-01 13:45:00' (UTC) -> epoch nanoseconds."""
     from datetime import datetime, timezone
@@ -41,9 +44,12 @@ SQL = """
     JOIN patient p ON e.patient_id = p.id
     WHERE e.start_time >= ?
       AND e.start_time <= ?
+      AND (e.start_time - p.dob) >= ?
+      AND (e.start_time - p.dob) <= ?
+
 """
 
-PARAMS = (YEAR_2020, YEAR_2021)
+PARAMS = (YEAR_2021, YEAR_2024, min_age_ns, max_age_ns)
 
 LIMIT_PRINT = 50  # only print the first N rows
 # ============================== EDIT ABOVE ==============================
