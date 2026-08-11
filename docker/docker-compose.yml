@@ -1,0 +1,39 @@
+# AtriumDB query sandbox.
+#
+#   cp .env.example .env      # then point DATASET_LOCATION at the dataset
+#   docker compose build
+#   docker compose run --rm atriumdb
+#
+# The dataset is mounted read-only at /data/atriumdb, so the container can
+# never modify the source data.
+
+name: atriumdb-sandbox
+
+services:
+  atriumdb:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: atriumdb-query-sandbox:latest
+
+    # Run as the host user so anything written to ./out is not root-owned.
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+
+    volumes:
+      # host dataset -> container, read-only
+      - "${DATASET_LOCATION:?set DATASET_LOCATION in docker/.env}:/data/atriumdb:ro"
+      # query scripts, editable on the host without rebuilding the image
+      - "./queries:/workspace/queries"
+      # anything you want to keep (csv dumps, logs, ...)
+      - "./out:/workspace/out"
+
+    environment:
+      # what the SDK reads for dataset_location
+      ATRIUMDB_DATASET_LOCATION: /data/atriumdb
+      # convenience: the sqlite metadata file, used by queries/query_template.py
+      ATRIUMDB_INDEX_DB: /data/atriumdb/meta/index.db
+
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    command: ["/bin/bash"]

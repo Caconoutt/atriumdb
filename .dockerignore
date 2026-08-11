@@ -1,0 +1,27 @@
+# Keep the build context small, and keep local secrets / real dataset paths
+# out of the image.
+.git
+.github
+.idea
+.DS_Store
+
+# never bake a local .env (it holds the real dataset path) into the image
+.env
+.env-dev
+**/.env
+**/.env-dev
+
+# local virtualenvs and build leftovers
+**/.venv
+**/venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+sdk/atriumdb.egg-info
+sdk/docs
+tsc-lib/cmake-build-release
+tsc-lib/cmake-build-debug
+
+# docker's own directory is not needed inside the image
+docker/out
+docker/queries
