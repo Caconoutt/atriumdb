@@ -15,39 +15,46 @@
 #     You should have received a copy of the GNU General Public License
 #     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""Wiring that mounts the dashboard router onto a FastAPI application.
+"""Wiring that mounts the dashboard routers onto a FastAPI application.
 
-Kept separate from the router itself so that the dashboard can be attached to
-an application owned by someone else — the AtriumDB test app, or a real
+Kept separate from the routers themselves so that the dashboard can be attached
+to an application owned by someone else — the AtriumDB test app, or a real
 deployment — without either side importing the other.
 """
 
 from __future__ import annotations
 
-from atriumdb_dashboard.api.measures_endpoints import router
+from atriumdb_dashboard.api.cohort_endpoints import router as cohort_router
+from atriumdb_dashboard.api.measures_endpoints import router as measures_router
 
-DASHBOARD_PREFIX = "/measures"
+COHORT_PREFIX = "/cohorts"
+MEASURES_PREFIX = "/measures"
 
 
-def mount_dashboard(app, prefix: str = DASHBOARD_PREFIX):
-    """Attach the dashboard router to an existing FastAPI app.
+def _mount_router(app, router, prefix: str):
+    """Include ``router`` at ``prefix`` and move its routes to the front.
 
-    Additive by design: this is what replaces editing the host application's
-    endpoint modules, keeping the upstream AtriumDB test app byte-identical to
-    ``main``.
+    Starlette matches routes in registration order and takes the first full
+    match, with no preference for a more specific path. ``include_router`` can
+    only append, so a dashboard route added to an app that already has a
+    matching wildcard would never be reached.
 
-    The dashboard's routes are moved to the front of the app's routing table.
-    Starlette matches in registration order, and the host already registers
-    ``GET /measures/{measure_id}``; appended normally, a request for
-    ``/measures/hours`` would match that parameterised route with
-    ``measure_id="hours"`` instead of reaching this router. Registering first is
-    what the original in-place edit achieved by declaring ``/hours`` above
-    ``/{measure_id}`` in the same module. Only this router's literal paths move
-    ahead, so nothing else can be shadowed.
+    That is not hypothetical: the host registers ``GET /measures/{measure_id}``,
+    whose pattern also matches ``/measures/hours``. Appended normally, a request
+    for the dashboard endpoint resolves to ``get_measure_info(measure_id="hours")``
+    instead. Registering first is what the original in-place edit achieved by
+    declaring ``/hours`` above ``/{measure_id}`` in the same module.
+
+    The cohort routes have no such conflict — nothing upstream serves
+    ``/cohorts`` — but they are mounted the same way so that one rule covers
+    every router and a future host route cannot quietly capture them.
+
+    Only the routes added by this call move ahead, and every dashboard path is a
+    literal, so nothing already registered can be shadowed.
 
     :param app: The FastAPI application to mount onto.
-    :param prefix: URL prefix for the dashboard routes. Defaults to
-        ``"/measures"`` so the endpoint is served at ``/measures/hours``.
+    :param router: The ``APIRouter`` to include.
+    :param prefix: URL prefix for that router.
     :return: The same ``app``, to allow chaining.
     """
     first_new = len(app.router.routes)
@@ -60,12 +67,48 @@ def mount_dashboard(app, prefix: str = DASHBOARD_PREFIX):
     return app
 
 
-def create_dashboard_app(prefix: str = DASHBOARD_PREFIX):
+def mount_dashboard(
+    app,
+    cohort_prefix: str = COHORT_PREFIX,
+    measures_prefix: str = MEASURES_PREFIX,
+):
+    """Attach every dashboard router to an existing FastAPI app.
+
+    Additive by design: this is what replaces editing the host application's
+    endpoint modules, keeping the upstream AtriumDB test app byte-identical to
+    ``main``.
+
+    Each router keeps its own SDK dependency, so a caller overriding one does
+    not affect the other. Both providers are named ``get_sdk_instance``; import
+    them aliased apart, since ``dependency_overrides`` is keyed by the function
+    object and the unaliased names collide.
+
+    :param app: The FastAPI application to mount onto.
+    :param cohort_prefix: URL prefix for the cohorts router, serving
+        ``POST /cohorts``.
+    :param measures_prefix: URL prefix for the measures router, serving
+        ``GET /measures/hours``.
+    :return: The same ``app``, to allow chaining.
+    """
+    _mount_router(app, cohort_router, cohort_prefix)
+    _mount_router(app, measures_router, measures_prefix)
+    return app
+
+
+def create_dashboard_app(
+    cohort_prefix: str = COHORT_PREFIX,
+    measures_prefix: str = MEASURES_PREFIX,
+):
     """Build a standalone FastAPI app serving only the dashboard routes.
 
-    :param prefix: URL prefix for the dashboard routes.
+    :param cohort_prefix: URL prefix for the cohorts router.
+    :param measures_prefix: URL prefix for the measures router.
     :return: A new ``FastAPI`` instance with the dashboard mounted.
     """
     from fastapi import FastAPI
 
-    return mount_dashboard(FastAPI(), prefix=prefix)
+    return mount_dashboard(
+        FastAPI(),
+        cohort_prefix=cohort_prefix,
+        measures_prefix=measures_prefix,
+    )

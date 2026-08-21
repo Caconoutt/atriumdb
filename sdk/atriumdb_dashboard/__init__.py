@@ -22,15 +22,52 @@ the SDK never imports from it, so ``atriumdb`` can be upgraded or re-merged
 from upstream without touching anything here.
 
 The HTTP surface lives in :mod:`atriumdb_dashboard.api` and is deliberately
-not imported here, so that using the queries does not require FastAPI.
+not imported here, so that using the resolver does not require FastAPI.
 """
 
+from atriumdb_dashboard.cohort_resolver import resolve_cohort, resolve_cohorts_local
+from atriumdb_dashboard.locations import (
+    UnknownLocationError,
+    location_exists,
+    validate_location_codes,
+)
 from atriumdb_dashboard.queries import (
+    group_encounters_by_admission,
+    query_patient_encounters,
+    select_patient_encounters,
     query_measure_total_hours,
     select_measure_total_values,
 )
+from atriumdb_dashboard.schemas import (
+    Admission,
+    AdmissionDateRange,
+    AgeBand,
+    CohortDefinitionRequest,
+    DemographicCohort,
+    MrnCohort,
+    MrnCohortResponse,
+    PatientAdmission,
+    ResolvedCohort,
+)
 
 __all__ = [
+    "Admission",
+    "AdmissionDateRange",
+    "AgeBand",
+    "CohortDefinitionRequest",
+    "DemographicCohort",
+    "UnknownLocationError",
+    "MrnCohort",
+    "MrnCohortResponse",
+    "PatientAdmission",
+    "ResolvedCohort",
+    "group_encounters_by_admission",
+    "location_exists",
+    "query_patient_encounters",
+    "resolve_cohort",
+    "resolve_cohorts_local",
+    "select_patient_encounters",
+    "validate_location_codes",
     "query_measure_total_hours",
     "select_measure_total_values",
 ]

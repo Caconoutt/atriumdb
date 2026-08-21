@@ -16,11 +16,16 @@ The number reported is *recorded* time, not wall-clock span: it is derived from 
 actually stored in `block_index`, so gaps in acquisition are excluded rather than counted.
 
 ```
-GET /measures/hours
-  └─ query_measure_total_hours(sdk)                    [dashboard layer — unit conversion]
-        └─ sql_handler.select_measure_total_values()   [SQL layer — SUM(block_index.num_values)]
-              └─ num_values × period_ns → total_ns → total_hours
+GET /measures/hours                                     [atriumdb_dashboard.api]
+  └─ query_measure_total_hours(sdk)                     [unit conversion]
+        └─ select_measure_total_values(sdk)             [SUM(block_index.num_values)]
+              └─ sdk.sql_handler.connection(begin=False)
+                    └─ num_values × period_ns → total_ns → total_hours
 ```
+
+Both query functions live in `atriumdb_dashboard/queries.py`. Nothing is added to `atriumdb`:
+the SQL runs through `SQLHandler.connection()`, the backend-agnostic context manager that
+upstream already declares as abstract and both handlers implement.
 
 ---
 
@@ -28,37 +33,47 @@ GET /measures/hours
 
 ```
 atriumdb/sdk/
-├── atriumdb/
-│   ├── sql_handler/
-│   │   └── sql_handler.py                   ← MODIFIED: select_measure_total_values() concrete method
-│   └── dashboard/
-│       └── measure_queries.py               ← NEW: sample count → hours conversion
-├── tests/
-│   ├── mock_api/
-│   │   └── measures_endpoints.py            ← MODIFIED: GET /measures/hours route
-│   ├── test_dashboard_api.py                ← test_api_measure_total_hours (synthetic fixtures)
-│   └── test_dashboard_real_data.py          ← test_measure_hours_report (real dataset)
-├── Dockerfile                               ← NEW: Linux image for running the tests
-├── .dockignore                              ← NEW
-├── docker-run-dataset.sh                    ← NEW: runs the image with a dataset mounted
-└── dockersetup.md                           ← NEW: Docker usage notes
+├── atriumdb/                                ← UNCHANGED — byte-identical to upstream main
+├── atriumdb_dashboard/
+│   ├── pyproject.toml                       ← own distribution: atriumdb-dashboard
+│   ├── queries.py                           ← select_measure_total_values (SQL)
+│   │                                          + query_measure_total_hours (sample count → hours)
+│   ├── api/
+│   │   ├── measures_endpoints.py            ← GET /hours route + its own SDK dependency
+│   │   └── app.py                           ← mount_dashboard() attaches the router at /measures
+│   ├── docker/
+│   │   ├── Dockerfile
+│   │   ├── Dockerfile.dockerignore
+│   │   └── docker-run-dataset.sh
+│   └── docs/
+└── tests/
+    ├── mock_api/                            ← UNCHANGED — byte-identical to upstream main
+    └── atriumdb_dashboard/
+        ├── test_dashboard_api.py            ← test_api_measure_total_hours (synthetic fixtures)
+        └── test_dashboard_real_data.py      ← test_measure_hours_report (real dataset)
 ```
 
-`atrium_sdk.py` is untouched — there is no dual-mode SDK method for this endpoint (see §3.1).
+Nothing outside `atriumdb_dashboard/` and `tests/atriumdb_dashboard/` differs from upstream
+`main` — including `atrium_sdk.py`, which needs no dual-mode method for this endpoint (see §3.1).
+See `modularization_pattern.md` for the rules this layout follows.
 
 ---
 
 ## 2. The Query
 
-Responsibilities are split across the two layers the way `s1_cohort_definition_plan.md`
-describes: SQL lives in the handler, and the dashboard layer holds only Python.
+Both responsibilities live in `atriumdb_dashboard/queries.py`, split across two functions so the
+raw rows can be inspected without the unit conversion:
 
-| Layer | File | Responsibility |
-|---|---|---|
-| SQL | `sql_handler.py` → `select_measure_total_values()` | Aggregate `block_index.num_values` per measure; return raw tuples |
-| Dashboard | `measure_queries.py` → `query_measure_total_hours()` | Convert sample counts to `total_ns` / `total_hours`; shape into dicts |
+| Function | Responsibility |
+|---|---|
+| `select_measure_total_values(sdk)` | Aggregate `block_index.num_values` per measure; return raw tuples |
+| `query_measure_total_hours(sdk)` | Convert sample counts to `total_ns` / `total_hours`; shape into dicts |
 
-### 2.1 Data source (`SQLHandler.select_measure_total_values`)
+Neither is a handler method. Both take the SDK as their first argument and obtain a cursor from
+`sdk.sql_handler.connection(begin=False)`, so no `atriumdb` file is modified and no out-of-tree
+handler subclass is broken by a new abstract method.
+
+### 2.1 Data source (`select_measure_total_values`)
 
 `block_index` is the per-block catalogue written during ingestion. Each row records, for one
 `(measure_id, device_id)` block, how many samples it holds (`num_values`) and the time range it
@@ -166,21 +181,30 @@ Response is the list from §2.3, serialised directly by FastAPI:
 
 | Dimension | `POST /cohorts` (S1) | `GET /measures/hours` (S1.5) |
 |---|---|---|
-| SDK entry point | `sdk.dashboard_resolve_cohort()`, dual-mode | none — the endpoint calls the helper directly |
-| API-mode client support | Yes, via `_request()` | No; an API-mode SDK cannot reach this |
+| Entry point | `resolve_cohort(sdk, ...)`, dual-mode | `query_measure_total_hours(sdk)` — the endpoint calls it directly |
+| API-mode client support | Yes, via the dashboard's own HTTP client | No; an API-mode SDK cannot reach this |
 | Request/response models | Pydantic schemas | plain `list[dict]` |
 | `X-Request-ID` | required | not used — deliberate, see §5 |
-| SQL location | `sql_handler.select_patient_encounters()` (abstract, two implementations) | `sql_handler.select_measure_total_values()` (concrete, on the ABC) |
+| SQL location | `queries.select_patient_encounters(sdk, ...)` | `queries.select_measure_total_values(sdk)` |
+| Router prefix | `/cohorts` | `/measures` — mounted ahead of the host's `/{measure_id}` |
 
-The layering is the same as S1 — SQL in the handler, Python in the dashboard package. The
+The layering is the same as S1: all SQL lives in `atriumdb_dashboard/queries.py` and reaches the
+database through `sdk.sql_handler.connection()`, never through a method added to a handler. The
 remaining differences follow from the endpoint's small scope: it takes no input and returns a flat
 table, so there is nothing to validate, correlate, or model.
+
+One wrinkle is specific to this endpoint. The host already serves `GET /measures/{measure_id}`,
+and Starlette matches routes in registration order with no preference for a more specific path, so
+an appended `/measures/hours` would resolve to `get_measure_info(measure_id="hours")` instead.
+`mount_dashboard` therefore moves the dashboard's routes to the front of the routing table — the
+same effect the original in-place edit got by declaring `/hours` above `/{measure_id}` in one
+module.
 
 ---
 
 ## 4. Tests
 
-### 4.1 `tests/test_dashboard_api.py::test_api_measure_total_hours` — synthetic fixtures
+### 4.1 `tests/atriumdb_dashboard/test_dashboard_api.py::test_api_measure_total_hours` — synthetic fixtures
 
 Creates a SQLite dataset at `tests/test_datasets/sqlite_dashboard_api_hours_test` and starts the
 mock FastAPI app on port **8124**.
@@ -208,7 +232,7 @@ Assertions (all keyed by `measure_tag`, so they do not depend on row order):
 Float comparisons use a `1e-6` tolerance. The HTTP call is a plain `requests.get`, not an
 API-mode SDK call, because no SDK method wraps this endpoint (§3.1).
 
-### 4.2 `tests/test_dashboard_real_data.py::test_measure_hours_report` — real dataset
+### 4.2 `tests/atriumdb_dashboard/test_dashboard_real_data.py::test_measure_hours_report` — real dataset
 
 Runs the same helper against a mounted AtriumDB dataset. Skipped automatically when
 `ATRIUMDB_DATASET_LOCATION` is unset, so it never blocks a normal test run.
@@ -246,21 +270,21 @@ Both live behind Docker, because `AtriumSDK.__init__` refuses to construct on ma
 
 ```bash
 # Build once, from sdk/
-docker build -t atriumdb-sdk .
+docker build -t atriumdb-sdk -f atriumdb_dashboard/docker/Dockerfile .
 
 # Synthetic test (no dataset needed)
 docker run --rm -it -v "$(pwd):/sdk" atriumdb-sdk \
-  python -m pytest tests/test_dashboard_api.py::test_api_measure_total_hours -v -s
+  python -m pytest tests/atriumdb_dashboard/test_dashboard_api.py::test_api_measure_total_hours -v -s
 
 # Real-data report (dataset mounted read-only)
-./docker-run-dataset.sh python -m pytest \
-  tests/test_dashboard_real_data.py::test_measure_hours_report -v -s
+./atriumdb_dashboard/docker/docker-run-dataset.sh python -m pytest \
+  tests/atriumdb_dashboard/test_dashboard_real_data.py::test_measure_hours_report -v -s
 ```
 
 `docker-run-dataset.sh` mounts the dataset at `/data/atriumdb` **read-only** — this endpoint only
 reads — sets `ATRIUMDB_DATASET_LOCATION`, and bind-mounts the working copy over `/sdk` so the code
 under test is the current checkout. Set `HOST_DATASET_PATH` at the top of the script before use;
-it refuses to run while the placeholder value is in place. See `dockersetup.md` for the full
+it refuses to run while the placeholder value is in place. See `atriumdb_dashboard/docs/dockersetup.md` for the full
 Docker workflow.
 
 ---

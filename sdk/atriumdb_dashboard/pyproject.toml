@@ -20,7 +20,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "atriumdb-dashboard"
 version = "0.1.0"
-description = "Dashboard measure-statistics extensions for AtriumDB"
+description = "Dashboard cohort-resolution extensions for AtriumDB"
 readme = "docs/dockersetup.md"
 requires-python = ">=3.10"
 license = { text = "GPL-3.0-or-later" }
@@ -33,18 +33,20 @@ classifiers = [
     "Intended Audience :: Healthcare Industry",
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
 ]
-keywords = ["atriumdb", "dashboard", "statistics", "medical data"]
+keywords = ["atriumdb", "dashboard", "cohort", "medical data"]
 
 # atriumdb is required but deliberately unpinned to a narrow range: this
 # package is meant to keep working across SDK upgrades, which is the whole
 # reason it lives outside the atriumdb tree.
 dependencies = [
     "atriumdb >= 2.6.0",
+    "pydantic >= 2.0, < 3",
+    "requests >= 2.32.4, < 3",
 ]
 
 [project.optional-dependencies]
 # Only needed to serve the HTTP endpoints (atriumdb_dashboard.api).
-# The query layer itself works without FastAPI installed.
+# The resolver itself works without FastAPI installed.
 api = [
     "fastapi >= 0.95.0, < 1",
     "uvicorn >= 0.35.0, < 1",
@@ -52,7 +54,6 @@ api = [
 testing = [
     "fastapi >= 0.95.0, < 1",
     "uvicorn >= 0.35.0, < 1",
-    "requests >= 2.32.4, < 3",
     "pytest >= 7.2.1",
 ]
 
