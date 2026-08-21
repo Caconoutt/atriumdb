@@ -28,9 +28,9 @@ import datetime
 import pytest
 
 from atriumdb import AtriumSDK
-from atriumdb.dashboard.measure_queries import query_measure_total_hours
+from atriumdb_dashboard.queries import query_measure_total_hours
 
-# from atriumdb.dashboard.schemas import (
+# from atriumdb_dashboard.schemas import (
 #     AdmissionDateRange,
 #     AgeBand,
 #     CohortDefinitionRequest,
@@ -101,7 +101,7 @@ def sdk():
 
 
 # ---------------------------------------------------------------------------
-# Step 2 — MRN cohort (Priority 1A)  [requires atriumdb.dashboard.schemas]
+# Step 2 — MRN cohort (Priority 1A)  [requires atriumdb_dashboard.schemas]
 # ---------------------------------------------------------------------------
 
 # KNOWN_MRNS: list[str] = [
@@ -130,7 +130,7 @@ def sdk():
 
 
 # ---------------------------------------------------------------------------
-# Step 3 — demographic cohort (Priority 1B)  [requires atriumdb.dashboard.schemas]
+# Step 3 — demographic cohort (Priority 1B)  [requires atriumdb_dashboard.schemas]
 # ---------------------------------------------------------------------------
 
 # def test_demographic_cohort_no_filters(sdk):

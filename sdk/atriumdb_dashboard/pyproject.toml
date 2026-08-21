@@ -1,0 +1,69 @@
+# pyproject.toml — atriumdb-dashboard
+#
+# A standalone distribution that layers dashboard functionality over the
+# `atriumdb` SDK. It depends on atriumdb; atriumdb never depends on it. Keeping
+# the build definition here means upstream `sdk/pyproject.toml` stays identical
+# to main and never conflicts on merge.
+#
+# Build/install from this directory:
+#     pip install -e .
+#
+# The package lives in this same directory rather than a nested source folder,
+# so `package-dir` maps the import name onto "." explicitly. Without that,
+# setuptools would try to package `api/`, `docs/`, and `docker/` as top-level
+# modules.
+
+[build-system]
+requires      = ["setuptools>=78.1.1", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atriumdb-dashboard"
+version = "0.1.0"
+description = "Dashboard measure-statistics extensions for AtriumDB"
+readme = "docs/dockersetup.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-or-later" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Intended Audience :: Healthcare Industry",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+keywords = ["atriumdb", "dashboard", "statistics", "medical data"]
+
+# atriumdb is required but deliberately unpinned to a narrow range: this
+# package is meant to keep working across SDK upgrades, which is the whole
+# reason it lives outside the atriumdb tree.
+dependencies = [
+    "atriumdb >= 2.6.0",
+]
+
+[project.optional-dependencies]
+# Only needed to serve the HTTP endpoints (atriumdb_dashboard.api).
+# The query layer itself works without FastAPI installed.
+api = [
+    "fastapi >= 0.95.0, < 1",
+    "uvicorn >= 0.35.0, < 1",
+]
+testing = [
+    "fastapi >= 0.95.0, < 1",
+    "uvicorn >= 0.35.0, < 1",
+    "requests >= 2.32.4, < 3",
+    "pytest >= 7.2.1",
+]
+
+[project.urls]
+Homepage = "https://atriumdb.io"
+Documentation = "https://docs.atriumdb.io/"
+
+# Flat layout: the package root is this directory itself.
+[tool.setuptools]
+packages = ["atriumdb_dashboard", "atriumdb_dashboard.api"]
+
+[tool.setuptools.package-dir]
+"atriumdb_dashboard"     = "."
+"atriumdb_dashboard.api" = "api"

@@ -23,19 +23,25 @@ import requests
 import uvicorn
 
 from atriumdb.atrium_sdk import AtriumSDK
-from atriumdb.dashboard.measure_queries import query_measure_total_hours
-# from atriumdb.dashboard.schemas import (
+from atriumdb_dashboard.queries import query_measure_total_hours
+# from atriumdb_dashboard.schemas import (
 #     AdmissionDateRange, AgeBand, CohortDefinitionRequest,
 #     DemographicCohort, MrnCohort,
 # )
+from atriumdb_dashboard.api.app import mount_dashboard
+from atriumdb_dashboard.api.measures_endpoints import get_sdk_instance
 from tests.mock_api.app import app
-from tests.mock_api.sdk_dependency import get_sdk_instance
+
+# Mount the dashboard onto the upstream AtriumDB test app at runtime, rather
+# than editing tests/mock_api/measures_endpoints.py, so that file stays
+# identical to main.
+mount_dashboard(app)
 
 DB_NAME = 'dashboard_api_test'
-SQLITE_DATASET_PATH = Path(__file__).parent / "test_datasets" / f"sqlite_{DB_NAME}"
+SQLITE_DATASET_PATH = Path(__file__).parent.parent / "test_datasets" / f"sqlite_{DB_NAME}"
 
 DB_NAME_HOURS = 'dashboard_api_hours_test'
-SQLITE_DATASET_PATH_HOURS = Path(__file__).parent / "test_datasets" / f"sqlite_{DB_NAME_HOURS}"
+SQLITE_DATASET_PATH_HOURS = Path(__file__).parent.parent / "test_datasets" / f"sqlite_{DB_NAME_HOURS}"
 HOURS_API_PORT = 8124
 
 
