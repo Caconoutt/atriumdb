@@ -67,7 +67,7 @@ atriumdb/sdk/
 │       └── dockersetup.md                   ← Docker usage notes
 ├── tests/
 │   ├── mock_api/                            ← UNCHANGED — byte-identical to upstream main
-│   └── dashboard/
+│   └── atriumdb_dashboard/
 │       ├── __init__.py
 │       ├── test_dashboard_api.py            ← synthetic-fixture cohort tests (SQLite + HTTP);
 │       │                                      calls mount_dashboard(app) at import time
@@ -75,7 +75,7 @@ atriumdb/sdk/
 │       └── z_test_local_setup.py            ← seeds MRNs/encounters into a real dataset
 └── pyproject.toml                           ← UNCHANGED — byte-identical to upstream main
 
-Nothing outside `atriumdb_dashboard/` and `tests/dashboard/` differs from upstream main.
+Nothing outside `atriumdb_dashboard/` and `tests/atriumdb_dashboard/` differs from upstream main.
 `atriumdb-dashboard` is a distribution in its own right, versioned separately and installed
 alongside the SDK:
 

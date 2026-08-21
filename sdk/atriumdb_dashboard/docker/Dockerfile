@@ -24,4 +24,4 @@ RUN pip install --no-cache-dir -e "./atriumdb_dashboard[testing]"
 
 # Default command: run the dashboard cohort tests.
 # Override this on the docker run command line to run a different test file or get a shell.
-CMD ["python", "-m", "pytest", "tests/dashboard/test_dashboard_api.py", "-v", "-s"]
+CMD ["python", "-m", "pytest", "tests/atriumdb_dashboard/test_dashboard_api.py", "-v", "-s"]
