@@ -1,0 +1,4 @@
+# Written next to the test file by test_measure_hours_report. Ignored here
+# rather than in the repo-root .gitignore so that file stays identical to main.
+measure_hours_report.log
+test_datasets/

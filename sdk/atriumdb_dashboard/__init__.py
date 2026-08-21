@@ -35,6 +35,8 @@ from atriumdb_dashboard.queries import (
     group_encounters_by_admission,
     query_patient_encounters,
     select_patient_encounters,
+    query_measure_total_hours,
+    select_measure_total_values,
 )
 from atriumdb_dashboard.schemas import (
     Admission,
@@ -66,4 +68,6 @@ __all__ = [
     "resolve_cohorts_local",
     "select_patient_encounters",
     "validate_location_codes",
+    "query_measure_total_hours",
+    "select_measure_total_values",
 ]

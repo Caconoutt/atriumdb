@@ -25,36 +25,90 @@ import uvicorn
 from pydantic import ValidationError
 
 from atriumdb.atrium_sdk import AtriumSDK
-from atriumdb_dashboard.schemas import (
-    AdmissionDateRange, AgeBand, CohortDefinitionRequest,
-    DemographicCohort, MrnCohort,
-)
 from atriumdb_dashboard.api.app import mount_dashboard
-from atriumdb_dashboard.api.cohort_endpoints import get_sdk_instance
+# Each router ships its own SDK provider, and both are named get_sdk_instance.
+# They must be aliased apart: dependency_overrides is keyed by the function
+# object, so importing both unaliased would leave one name bound to the other
+# module's provider and silently override the wrong router.
+from atriumdb_dashboard.api.cohort_endpoints import get_sdk_instance as get_cohort_sdk
+from atriumdb_dashboard.api.measures_endpoints import get_sdk_instance as get_measures_sdk
 from atriumdb_dashboard.cohort_resolver import resolve_cohort
 from atriumdb_dashboard.locations import UnknownLocationError
 from atriumdb_dashboard.queries import (
     group_encounters_by_admission,
+    query_measure_total_hours,
     query_patient_encounters,
     select_patient_encounters,
+)
+from atriumdb_dashboard.schemas import (
+    AdmissionDateRange, AgeBand, CohortDefinitionRequest,
+    DemographicCohort, MrnCohort,
 )
 from tests.mock_api.app import app
 
 # Mount the dashboard onto the upstream AtriumDB test app at runtime, rather
-# than editing tests/mock_api/app.py, so that file stays identical to main.
+# than editing the upstream endpoint modules, so they stay identical to main.
 mount_dashboard(app)
 
 DB_NAME = 'dashboard_api_test'
 SQLITE_DATASET_PATH = Path(__file__).parent.parent / "test_datasets" / f"sqlite_{DB_NAME}"
 
+DB_NAME_HOURS = 'dashboard_api_hours_test'
+SQLITE_DATASET_PATH_HOURS = Path(__file__).parent.parent / "test_datasets" / f"sqlite_{DB_NAME_HOURS}"
+
+# One server on one port for the whole module. Both routers are mounted on the
+# same `app`, which is how they are deployed, so serving them from two ports
+# would have tested the identical object twice while proving nothing about
+# either. A single server is also the only arrangement that can catch the
+# routers interfering with one another.
+API_PORT = 8123
+BASE_URL = f"http://127.0.0.1:{API_PORT}"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def api_server():
+    """Start the test API server once, and wait until it answers.
+
+    Session-wide rather than per-test: ``uvicorn.run`` binds the port, so a
+    second test starting its own server on the same port would fail with
+    "address already in use".
+
+    Readiness is polled rather than slept on. A fixed sleep is both slower than
+    it needs to be and unreliable under load, and the previous arrangement was
+    worse than it looked — only one of the two tests waited at all, the other
+    happening to work because building its dataset took longer than uvicorn
+    took to bind.
+    """
+    threading.Thread(
+        target=lambda: uvicorn.run(app, port=API_PORT, log_level="warning"),
+        daemon=True,
+    ).start()
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        try:
+            requests.get(f"{BASE_URL}/openapi.json", timeout=0.2)
+            return
+        except requests.exceptions.RequestException:
+            time.sleep(0.05)
+
+    raise RuntimeError(f"test API server did not come up on port {API_PORT}")
+
+
+@pytest.fixture(autouse=True)
+def clear_dependency_overrides():
+    """Drop dependency overrides after each test.
+
+    ``app`` is a module-level singleton shared by every test, so an override
+    left behind outlives the SDK it closes over — and the dataset directory
+    that SDK points at is deleted by the next run. Clearing keeps the tests
+    order-independent.
+    """
+    yield
+    app.dependency_overrides.clear()
+
 
 def test_api_cohorts():
-    def start_server():
-        uvicorn.run(app, port=8123)
-
-    api_thread = threading.Thread(target=start_server, daemon=True)
-    api_thread.start()
-
     shutil.rmtree(SQLITE_DATASET_PATH, ignore_errors=True)
     _test_api_cohorts('sqlite', SQLITE_DATASET_PATH, None)
 
@@ -63,9 +117,9 @@ def _test_api_cohorts(db_type, dataset_location, connection_params):
     sdk = AtriumSDK.create_dataset(
         dataset_location=dataset_location, database_type=db_type, connection_params=connection_params)
 
-    app.dependency_overrides[get_sdk_instance] = lambda: sdk
+    app.dependency_overrides[get_cohort_sdk] = lambda: sdk
 
-    api_sdk = AtriumSDK(metadata_connection_type="api", api_url="http://127.0.0.1:8123", validate_token=False)
+    api_sdk = AtriumSDK(metadata_connection_type="api", api_url=BASE_URL, validate_token=False)
     api_sdk.token_expiry = time.time() + 1_000_000
 
     # --- set up location infrastructure (institution → unit → bed) ---
@@ -351,7 +405,7 @@ def _test_invalid_input_is_rejected(sdk, date_range):
     """
     print("Testing input validation over HTTP...")
 
-    base_url = "http://127.0.0.1:8123"
+    base_url = BASE_URL
     valid_body = CohortDefinitionRequest(
         type="demographic",
         admission_date_range=date_range,
@@ -436,3 +490,72 @@ def _test_invalid_input_is_rejected(sdk, date_range):
                 CohortDefinitionRequest.model_validate(valid_body),
                 request_id=blank,
             )
+
+
+def test_api_measure_total_hours():
+    shutil.rmtree(SQLITE_DATASET_PATH_HOURS, ignore_errors=True)
+    _test_api_measure_total_hours('sqlite', SQLITE_DATASET_PATH_HOURS, None)
+
+
+def _test_api_measure_total_hours(db_type, dataset_location, connection_params):
+    sdk = AtriumSDK.create_dataset(
+        dataset_location=dataset_location, database_type=db_type, connection_params=connection_params)
+
+    app.dependency_overrides[get_measures_sdk] = lambda: sdk
+
+    # --- create measures and devices ---
+    hr_id = sdk.insert_measure(measure_tag="HR", freq=1, freq_units="Hz", units="BPM")
+    spo2_id = sdk.insert_measure(measure_tag="SpO2", freq=1, freq_units="Hz", units="%")
+    dev1_id = sdk.insert_device(device_tag="monitor_1")
+    dev2_id = sdk.insert_device(device_tag="monitor_2")
+
+    # Seed block_index directly — no C library (libTSC.so) needed.
+    # The query under test reads block_index.num_values and converts to hours
+    # using freq_nhz.  HR and SpO2 both have freq=1 Hz → freq_nhz=1_000_000_000.
+    #   HR   / device 1 → 7200 values  (= 2 h at 1 Hz)
+    #   HR   / device 2 → 3600 values  (= 1 h at 1 Hz)
+    #   SpO2 / device 1 → 3600 values  (= 1 h at 1 Hz)
+    _NS_PER_HOUR = 3_600_000_000_000
+    base_ns = 1_700_000_000 * 1_000_000_000
+    with sdk.sql_handler.connection(begin=True) as (conn, cursor):
+        cursor.executemany(
+            "INSERT INTO block_index "
+            "(measure_id, device_id, file_id, start_byte, num_bytes, start_time_n, end_time_n, num_values) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (hr_id,   dev1_id, 0, 0, 0, base_ns, base_ns + 2 * _NS_PER_HOUR, 7200),
+                (hr_id,   dev2_id, 0, 0, 0, base_ns, base_ns + 1 * _NS_PER_HOUR, 3600),
+                (spo2_id, dev1_id, 0, 0, 0, base_ns, base_ns + 1 * _NS_PER_HOUR, 3600),
+            ],
+        )
+
+    print("Testing measure_total_hours: local helper...")
+
+    local_result = query_measure_total_hours(sdk)
+    assert len(local_result) == 2
+
+    by_tag = {r["measure_tag"]: r for r in local_result}
+
+    assert set(by_tag["HR"].keys()) == {"measure_id", "measure_tag", "freq_nhz", "units",
+                                        "total_num_values", "total_ns", "total_hours"}
+    assert abs(by_tag["HR"]["total_hours"] - 3.0) < 1e-6
+    assert by_tag["HR"]["total_num_values"] == 10800
+    assert abs(by_tag["SpO2"]["total_hours"] - 1.0) < 1e-6
+    assert by_tag["SpO2"]["total_num_values"] == 3600
+
+    print("Testing measure_total_hours: API endpoint GET /measures/hours...")
+
+    resp = requests.get(f"{BASE_URL}/measures/hours", timeout=10)
+    assert resp.status_code == 200
+
+    api_result = resp.json()
+    assert len(api_result) == 2
+
+    by_tag_api = {r["measure_tag"]: r for r in api_result}
+
+    assert abs(by_tag_api["HR"]["total_hours"] - 3.0) < 1e-6
+    assert by_tag_api["HR"]["total_num_values"] == 10800
+    assert abs(by_tag_api["SpO2"]["total_hours"] - 1.0) < 1e-6
+    assert by_tag_api["SpO2"]["total_num_values"] == 3600
+
+    print("All measure_total_hours tests passed.")
