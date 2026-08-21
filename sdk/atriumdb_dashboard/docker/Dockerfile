@@ -16,6 +16,12 @@ COPY . .
 # Editable mode (-e) means changes to the source are picked up without rebuilding.
 RUN pip install --no-cache-dir -e ".[testing]"
 
+# Install the dashboard as its own distribution. It declares atriumdb as a
+# dependency, which the editable install above already satisfies, so nothing is
+# pulled from PyPI. A separate install is what lets the dashboard be versioned,
+# built, and shipped independently of the SDK.
+RUN pip install --no-cache-dir -e "./atriumdb_dashboard[testing]"
+
 # Default command: run the dashboard cohort tests.
 # Override this on the docker run command line to run a different test file or get a shell.
-CMD ["python", "-m", "pytest", "tests/test_dashboard_api.py", "-v", "-s"]
+CMD ["python", "-m", "pytest", "tests/dashboard/test_dashboard_api.py", "-v", "-s"]

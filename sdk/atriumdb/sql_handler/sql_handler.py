@@ -519,49 +519,6 @@ class SQLHandler(ABC):
         pass
 
     @abstractmethod
-    def select_patient_encounters(
-        self,
-        patient_id_list: Optional[List[int]] = None,
-        admit_start_ns: Optional[int] = None,
-        admit_end_ns: Optional[int] = None,
-        unit_name_list: Optional[List[str]] = None,
-    ) -> List[tuple]:
-        """Query encounters joined to bed and unit for dashboard cohort resolution.
-
-        Executes the JOIN chain ``encounter → bed → unit`` and returns one raw
-        tuple per matching ``encounter`` row. Encounters where ``bed_id`` is
-        NULL are excluded by the INNER JOIN (pre-admission placeholder rows
-        without a bed assignment are not considered admissions).
-
-        Filtering is additive: all supplied arguments are AND-ed in the WHERE
-        clause. Omitting an argument (leaving it ``None``) applies no filter
-        for that dimension.
-
-        Called by :func:`atriumdb.dashboard.encounter_queries.query_patient_encounters`,
-        which handles the dashboard-level translation from API location codes
-        (e.g. ``"ICU"``) to ``unit.name`` values before calling this method.
-
-        :param patient_id_list: Restrict to these internal patient IDs.
-            ``None`` applies no patient filter.
-        :param admit_start_ns: Lower bound on ``encounter.start_time``
-            (inclusive), epoch nanoseconds. ``None`` means no lower bound.
-        :param admit_end_ns: Upper bound on ``encounter.start_time``
-            (inclusive), epoch nanoseconds. ``None`` means no upper bound.
-        :param unit_name_list: Restrict to encounters in units whose
-            ``unit.name`` is in this list. Values must already be resolved
-            from API location codes by the caller. ``None`` applies no
-            location filter.
-        :return: List of tuples, one per matching ``encounter`` row, in
-            ascending ``start_time`` order::
-
-                (encounter_id, patient_id, visit_number, bed_id,
-                 unit_id, unit_name, start_time_ns, end_time_ns)
-
-            ``end_time_ns`` is ``None`` when the stay is ongoing.
-        """
-        pass
-
-    @abstractmethod
     def select_all_measures_in_list(self, measure_id_list: List[int]):
         # Get all matching measures.
         pass

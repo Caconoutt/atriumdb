@@ -58,8 +58,6 @@ from atriumdb.windowing.random_access_iterator import MappedIterator
 from atriumdb.windowing.verify_definition import verify_definition
 from atriumdb.windowing.definition_splitter import partition_dataset
 from atriumdb.write_buffer import WriteBuffer
-from atriumdb.dashboard.schemas import MrnCohortResponse
-from atriumdb.dashboard.cohort_resolver import resolve_cohorts_local
 
 try:
     import requests
@@ -3133,46 +3131,6 @@ class AtriumSDK:
         self.get_all_patients()
         return {pid: self._patient_id_to_mrn[pid] for pid in patient_id_list_int if pid in self._patient_id_to_mrn}
 
-    def dashboard_resolve_cohort(self, request, request_id: str):
-        """Resolve a cohort definition request into validated patient lists.
-
-        :param request: A
-            :class:`~atriumdb.dashboard.schemas.CohortDefinitionRequest`
-            instance describing the cohort type, the shared admission date
-            range, and one or more cohort definitions.
-        :param request_id: Correlation ID supplied by the caller, attached to
-            every log message emitted while resolving this request and echoed
-            in the response ``requestId`` field. Corresponds to the
-            ``X-Request-ID`` header in the HTTP API. Required — there is no
-            default, and a blank value is rejected before any query runs so
-            that no resolution work is ever performed untraceably.
-        :type request_id: str
-        :return: A
-            :class:`~atriumdb.dashboard.schemas.MrnCohortResponse` containing
-            one resolved ``ResolvedCohort`` per input cohort. Every patient in
-            the response is confirmed to exist in AtriumDB and to have at least
-            one admission record within the requested date range.
-        :rtype: MrnCohortResponse
-        :raises ValueError: If ``request_id`` is ``None``, empty, or blank.
-        """
-        if request_id is None or not str(request_id).strip():
-            _LOGGER.error(
-                "dashboard_resolve_cohort called with missing or blank "
-                "request_id — every dashboard request must supply a non-empty request_id."
-            )
-            raise ValueError("request_id must be a non-empty string.")
-
-        if self.metadata_connection_type == "api":
-            raw = self._request(
-                "POST",
-                "cohorts/",
-                json=request.model_dump(by_alias=True),
-                headers={"X-Request-ID": request_id},
-            )
-            return MrnCohortResponse.model_validate(raw)
-
-        return resolve_cohorts_local(self, request, request_id)
-
     def insert_patient(self, patient_id: int = None, mrn: str = None, gender: str = None, dob: int = None,
                        first_name: str = None, middle_name: str = None, last_name: str = None, first_seen: int = None,
                        last_updated: int = None, source_id: int = 1, weight: float = None, weight_units: str = None,
@@ -5361,8 +5319,8 @@ of DatasetIterator objects depending on the value of num_iterators.
             # get new API token
             self._refresh_token()
 
-        # Merge the Authorization header with any caller-supplied headers (e.g. X-Request-ID).
-        headers = {'Authorization': f"Bearer {self.token}", **kwargs.pop('headers', {})}
+        # Set the authorization header using the stored access token.
+        headers = {'Authorization': f"Bearer {self.token}"}
 
         # Send the API request using the specified method, URL, headers, and any additional arguments.
         response = requests.request(method, url, headers=headers, **kwargs)

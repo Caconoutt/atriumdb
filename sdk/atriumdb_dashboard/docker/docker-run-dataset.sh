@@ -31,7 +31,7 @@ fi
 if ! docker image inspect "$IMAGE" > /dev/null 2>&1; then
     echo "ERROR: Docker image '$IMAGE' not found." >&2
     echo "       Build it first from the sdk/ directory:" >&2
-    echo "         docker build -t $IMAGE ." >&2
+    echo "         docker build -t $IMAGE -f atriumdb_dashboard/docker/Dockerfile ." >&2
     exit 1
 fi
 

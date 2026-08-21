@@ -689,47 +689,6 @@ class MariaDBHandler(SQLHandler):
             cursor.execute(maria_select_encounter_query, arg_tuple)
             return cursor.fetchall()
 
-    def select_patient_encounters(self, patient_id_list=None, admit_start_ns=None,
-                                   admit_end_ns=None, unit_name_list=None):
-        # Dashboard cohort resolver: encounter JOIN bed JOIN unit with optional filters.
-        arg_tuple = ()
-        maria_select_patient_encounters_query = (
-            "SELECT e.id, e.patient_id, e.visit_number, e.bed_id, "
-            "u.id, u.name, e.start_time, e.end_time "
-            "FROM encounter e "
-            "JOIN bed b ON e.bed_id = b.id "
-            "JOIN unit u ON b.unit_id = u.id"
-        )
-        where_clauses = []
-
-        if patient_id_list is not None and len(patient_id_list) > 0:
-            where_clauses.append("e.patient_id IN ({})".format(
-                ','.join(['?'] * len(patient_id_list))))
-            arg_tuple += tuple(int(pid) for pid in patient_id_list)
-
-        if admit_start_ns is not None:
-            where_clauses.append("e.start_time >= ?")
-            arg_tuple += (int(admit_start_ns),)
-
-        if admit_end_ns is not None:
-            where_clauses.append("e.start_time <= ?")
-            arg_tuple += (int(admit_end_ns),)
-
-        if unit_name_list is not None and len(unit_name_list) > 0:
-            where_clauses.append("u.name IN ({})".format(
-                ','.join(['?'] * len(unit_name_list))))
-            arg_tuple += tuple(unit_name_list)
-
-        if where_clauses:
-            maria_select_patient_encounters_query += " WHERE " + " AND ".join(where_clauses)
-
-        maria_select_patient_encounters_query += " ORDER BY e.start_time ASC"
-
-        with self.maria_db_connection() as (conn, cursor):
-            cursor.execute(maria_select_patient_encounters_query, arg_tuple)
-            rows = cursor.fetchall()
-        return rows
-
     def select_all_measures_in_list(self, measure_id_list: List[int]):
         placeholders = ', '.join(['?'] * len(measure_id_list))
         maria_select_measures_by_id_list = f"SELECT id, tag, name, freq_nhz, code, unit, unit_label, unit_code, source_id FROM measure WHERE id IN ({placeholders})"

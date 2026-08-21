@@ -25,7 +25,9 @@ of ``"sqlite"``, ``"mysql"``, or ``"mariadb"``). It is called:
 - by the FastAPI endpoint (``cohort_endpoints.py``), when a remote caller
   sends a ``POST /cohorts`` request to the dashboard server.
 
-The entry point is :func:`resolve_cohorts_local`, which dispatches to either
+The public entry point is :func:`resolve_cohort`, which routes to the remote
+API when the SDK is in ``"api"`` mode and otherwise to
+:func:`resolve_cohorts_local`. The latter dispatches to either
 :func:`_resolve_mrn_cohort` (1A) or :func:`_resolve_demographic_cohort` (1B)
 depending on the request type.
 """
@@ -33,13 +35,15 @@ depending on the request type.
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING
 
-from atriumdb.dashboard.encounter_queries import (
+from atriumdb_dashboard.locations import validate_location_codes
+from atriumdb_dashboard.queries import (
     group_encounters_by_admission,
     query_patient_encounters,
 )
-from atriumdb.dashboard.schemas import (
+from atriumdb_dashboard.schemas import (
     Admission,
     AdmissionDateRange,
     CohortDefinitionRequest,
@@ -69,6 +73,107 @@ def _to_admission(record: dict) -> Admission:
     )
 
 
+__all__ = [
+    "resolve_cohort",
+    "resolve_cohorts_local",
+]
+
+# Endpoint path on the AtriumDB API server, relative to ``sdk.api_url``.
+_COHORTS_ENDPOINT = "cohorts/"
+
+# Refresh the access token if it expires within this many seconds. Mirrors the
+# margin used by ``AtriumSDK._request``.
+_TOKEN_REFRESH_MARGIN_S = 30
+
+
+def _post_cohorts_remote(
+    sdk: "AtriumSDK",
+    request: CohortDefinitionRequest,
+    request_id: str,
+) -> MrnCohortResponse:
+    """POST a cohort request to the AtriumDB API and parse the response.
+
+    Deliberately does not use ``AtriumSDK._request``: that helper overwrites
+    the header dict, so it cannot carry ``X-Request-ID``. Issuing the request
+    here keeps the dashboard entirely additive — the ``atriumdb`` package
+    needs no modification — at the cost of restating the token-refresh check
+    and error handling that ``_request`` performs.
+
+    :param sdk: AtriumSDK instance in ``"api"`` mode.
+    :param request: The cohort definition request to send.
+    :param request_id: Sent as the ``X-Request-ID`` header.
+    :return: The parsed :class:`~atriumdb_dashboard.schemas.MrnCohortResponse`.
+    :raises ValueError: If the API responds with a non-200 status code.
+    """
+    import requests
+
+    url = f"{sdk.api_url.rstrip('/')}/{_COHORTS_ENDPOINT.lstrip('/')}"
+
+    # Refresh the token if it is about to expire, matching ``_request``.
+    if sdk.validate_token and time.time() >= sdk.token_expiry - _TOKEN_REFRESH_MARGIN_S:
+        sdk._refresh_token()
+
+    response = requests.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {sdk.token}",
+            "X-Request-ID": request_id,
+        },
+        json=request.model_dump(by_alias=True),
+    )
+
+    if response.status_code != 200:
+        raise ValueError(
+            f"API request failed with status code {response.status_code}: "
+            f"{response.text} \n url: {url}"
+        )
+
+    return MrnCohortResponse.model_validate(response.json())
+
+
+def resolve_cohort(
+    sdk: "AtriumSDK",
+    request: CohortDefinitionRequest,
+    request_id: str,
+) -> MrnCohortResponse:
+    """Resolve a cohort definition request into validated patient lists.
+
+    The single entry point for dashboard cohort resolution. Routes to the
+    remote API when ``sdk`` is in ``"api"`` mode, and resolves in-process
+    against the database otherwise.
+
+    :param sdk: AtriumSDK instance, in either direct-DB or ``"api"`` mode.
+    :param request: A
+        :class:`~atriumdb_dashboard.schemas.CohortDefinitionRequest` instance
+        describing the cohort type, the shared admission date range, and one
+        or more cohort definitions.
+    :param request_id: Correlation ID supplied by the caller, attached to
+        every log message emitted while resolving this request and echoed in
+        the response ``requestId`` field. Corresponds to the ``X-Request-ID``
+        header in the HTTP API. Required — there is no default, and a blank
+        value is rejected before any query runs so that no resolution work is
+        ever performed untraceably.
+    :type request_id: str
+    :return: A :class:`~atriumdb_dashboard.schemas.MrnCohortResponse`
+        containing one resolved ``ResolvedCohort`` per input cohort. Every
+        patient in the response is confirmed to exist in AtriumDB and to have
+        at least one admission record within the requested date range.
+    :rtype: MrnCohortResponse
+    :raises ValueError: If ``request_id`` is ``None``, empty, or blank.
+    """
+    if request_id is None or not str(request_id).strip():
+        _LOGGER.error(
+            "resolve_cohort called with missing or blank request_id — "
+            "every dashboard request must supply a non-empty request_id."
+        )
+        raise ValueError("request_id must be a non-empty string.")
+
+    if sdk.metadata_connection_type == "api":
+        return _post_cohorts_remote(sdk, request, request_id)
+
+    return resolve_cohorts_local(sdk, request, request_id)
+
+
 def resolve_cohorts_local(
     sdk: "AtriumSDK",
     request: CohortDefinitionRequest,
@@ -78,7 +183,7 @@ def resolve_cohorts_local(
 
     Dispatches each cohort to either the MRN-validation path (1A) or the
     demographic-filter path (1B) based on ``request.type``, then assembles
-    the results into a :class:`~atriumdb.dashboard.schemas.MrnCohortResponse`.
+    the results into a :class:`~atriumdb_dashboard.schemas.MrnCohortResponse`.
 
     Cohorts are processed in order and results preserve that order. A cohort
     that produces zero qualifying patients is still included in the response
@@ -91,8 +196,8 @@ def resolve_cohorts_local(
         the shared ``admissionDateRange``.
     :param request_id: Value of the ``X-Request-ID`` header, echoed back in
         the response and attached to log messages. Caller guarantees this is a
-        non-empty string (validated by :meth:`~atriumdb.AtriumSDK.dashboard_resolve_cohort`).
-    :return: :class:`~atriumdb.dashboard.schemas.MrnCohortResponse` with one
+        non-empty string (validated by :func:`resolve_cohort`).
+    :return: :class:`~atriumdb_dashboard.schemas.MrnCohortResponse` with one
         resolved cohort per input cohort.
     """
     resolved: list[ResolvedCohort] = []
@@ -129,7 +234,7 @@ def _resolve_mrn_cohort(
        Uses ``sdk.get_mrn_to_patient_id_map`` which returns only found MRNs.
     2. **Admission range check** — does the patient have at least one
        ``encounter`` record with ``start_time`` within ``admission_date_range``?
-       Uses :func:`~atriumdb.dashboard.encounter_queries.query_patient_encounters`
+       Uses :func:`~atriumdb_dashboard.queries.query_patient_encounters`
        with no location filter (any unit counts).
 
     MRNs are normalised by stripping surrounding whitespace before either
@@ -137,13 +242,13 @@ def _resolve_mrn_cohort(
     comparison is exact string match.
 
     :param sdk: AtriumSDK instance in direct-DB mode.
-    :param cohort: The :class:`~atriumdb.dashboard.schemas.MrnCohort` to
+    :param cohort: The :class:`~atriumdb_dashboard.schemas.MrnCohort` to
         validate, containing the ``id`` and ``mrnList``.
     :param admission_date_range: Inclusive window (epoch nanoseconds). An MRN
         must have an encounter with ``start_time`` in ``[start, end]``.
     :param request_id: Attached to log messages to allow correlation across
         log lines for the same request.
-    :return: List of :class:`~atriumdb.dashboard.schemas.PatientAdmission` for
+    :return: List of :class:`~atriumdb_dashboard.schemas.PatientAdmission` for
         MRNs that passed both checks. Each entry contains all qualifying
         admission timestamps (sorted ascending) for that patient within the
         date range. May be empty if no MRNs in the input passed.
@@ -225,10 +330,12 @@ def _resolve_demographic_cohort(
     Applies three stages:
 
     **Stage 1 — Location + date filter (SQL)**
-        Calls :func:`~atriumdb.dashboard.encounter_queries.query_patient_encounters`
+        Validates ``location`` against the ``unit`` table via
+        :func:`~atriumdb_dashboard.locations.validate_location_codes`, then
+        calls :func:`~atriumdb_dashboard.queries.query_patient_encounters`
         with ``locations`` and ``admissionDateRange``. Collapses rows to
         per-admission records via
-        :func:`~atriumdb.dashboard.encounter_queries.group_encounters_by_admission`.
+        :func:`~atriumdb_dashboard.queries.group_encounters_by_admission`.
         All qualifying admissions per patient are retained — not just the earliest.
 
     **Stage 2 — Demographics fetch (SQL)**
@@ -253,21 +360,25 @@ def _resolve_demographic_cohort(
     are OR-ed (e.g. ``sex=["F","U"]`` keeps female *or* unknown patients).
 
     :param sdk: AtriumSDK instance in direct-DB mode.
-    :param cohort: The :class:`~atriumdb.dashboard.schemas.DemographicCohort`
+    :param cohort: The :class:`~atriumdb_dashboard.schemas.DemographicCohort`
         containing ``age``, ``sex``, and ``location`` filters.
     :param admission_date_range: Inclusive window (epoch nanoseconds) used
         both to scope the encounter candidate pool and to anchor each
         visit's age-at-admission calculation.
     :param request_id: Attached to log messages to allow correlation across
         log lines for the same request.
-    :return: List of :class:`~atriumdb.dashboard.schemas.PatientAdmission` for
+    :return: List of :class:`~atriumdb_dashboard.schemas.PatientAdmission` for
         patients that passed all active filters. Each entry contains all
         qualifying visit admission timestamps (sorted ascending). May be empty
         if no patients matched.
+    :raises UnknownLocationError: If a requested location has no matching
+        ``unit.name`` row.
     """
-    # Stage 1 — location + date filter. DemographicCohort validates its
-    # location codes against LOCATION_LOOKUP, so an unknown code is rejected at
-    # the request boundary and never reaches here.
+    # Stage 1 — location + date filter. Locations are checked against the
+    # unit table first: an unknown name would otherwise match no rows and
+    # silently return a wider cohort than the caller asked for.
+    validate_location_codes(sdk, cohort.location)
+
     encounter_rows = query_patient_encounters(
         sdk,
         locations=cohort.location,

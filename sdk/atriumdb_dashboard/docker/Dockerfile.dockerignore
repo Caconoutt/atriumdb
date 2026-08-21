@@ -4,3 +4,4 @@ __pycache__/
 *.pyo
 .pytest_cache/
 tests/test_datasets/
+tests/dashboard/test_datasets/

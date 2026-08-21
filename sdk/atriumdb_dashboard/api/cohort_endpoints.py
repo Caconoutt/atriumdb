@@ -15,13 +15,33 @@
 #     You should have received a copy of the GNU General Public License
 #     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-from fastapi import APIRouter, Depends, Header
+"""FastAPI router exposing ``POST /cohorts``.
+
+The router owns its own SDK dependency (:func:`get_sdk_instance`) rather than
+borrowing one from the test package, so the dashboard is self-contained and
+mountable on any FastAPI app. Callers wire it up with
+:func:`~atriumdb_dashboard.api.app.mount_dashboard`, and tests swap the SDK by
+overriding :func:`get_sdk_instance` in ``app.dependency_overrides``.
+"""
+
+from fastapi import APIRouter, Depends, Header, HTTPException
 
 from atriumdb import AtriumSDK
-from atriumdb.dashboard.schemas import CohortDefinitionRequest, MrnCohortResponse
-from tests.mock_api.sdk_dependency import get_sdk_instance
+from atriumdb_dashboard.cohort_resolver import resolve_cohort
+from atriumdb_dashboard.locations import UnknownLocationError
+from atriumdb_dashboard.schemas import CohortDefinitionRequest, MrnCohortResponse
 
 router = APIRouter()
+
+
+def get_sdk_instance() -> AtriumSDK:
+    """Provide the direct-DB SDK instance the endpoint resolves against.
+
+    The default constructs an SDK from the ambient environment. Deployments
+    and tests are expected to replace it via
+    ``app.dependency_overrides[get_sdk_instance]``.
+    """
+    return AtriumSDK()
 
 
 @router.post("", response_model=MrnCohortResponse)
@@ -34,7 +54,7 @@ async def post_cohorts(
 
     Routes to Priority 1A (MRN validation) or 1B (demographic filter) based
     on ``body.type``. Delegates entirely to
-    :meth:`~atriumdb.AtriumSDK.dashboard_resolve_cohort`, which runs the
+    :func:`~atriumdb_dashboard.cohort_resolver.resolve_cohort`, which runs the
     resolution in-process against the direct-DB SDK instance injected by
     ``get_sdk_instance``.
 
@@ -46,7 +66,16 @@ async def post_cohorts(
         the ``\\S`` pattern is what covers the whitespace-only case, which
         ``min_length`` alone lets through.
     :param sdk: AtriumSDK instance injected by ``get_sdk_instance``.
-    :return: :class:`~atriumdb.dashboard.schemas.MrnCohortResponse` with one
+    :return: :class:`~atriumdb_dashboard.schemas.MrnCohortResponse` with one
         resolved cohort per input cohort.
+    :raises HTTPException: 422 if a requested location matches no unit in the
+        dataset.
     """
-    return sdk.dashboard_resolve_cohort(body, request_id=x_request_id)
+    try:
+        return resolve_cohort(sdk, body, request_id=x_request_id)
+    except UnknownLocationError as exc:
+        # Locations are validated against the database, so this check cannot
+        # run in the Pydantic model the way the sex and date-range checks do.
+        # Translating it here keeps bad input a 422 rather than a 500, matching
+        # how every other invalid field behaves.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc

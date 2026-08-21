@@ -22,7 +22,6 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from pydantic.alias_generators import to_camel
 
-from atriumdb.dashboard.locations import LOCATION_LOOKUP
 
 #: Sex codes accepted in a demographic cohort filter. A patient whose
 #: ``patient.gender`` is NULL, empty, or the ``'U'`` unknown marker cannot match
@@ -151,10 +150,12 @@ class DemographicCohort(_Base):
         There is no code for unknown sex, so a patient whose ``gender`` is
         NULL, empty, or ``'U'`` is excluded whenever this filter is present.
         An unrecognised code is rejected rather than silently matching no one.
-    :param location: Optional list of API location codes (e.g. ``["ICU"]``).
-        Validated against ``LOCATION_LOOKUP`` here, then resolved to
-        ``unit.name`` values at query time. ``None`` means no location filter —
-        all admitted patients qualify.
+    :param location: Optional list of location names (e.g. ``["ICU"]``),
+        matched against ``unit.name``. Not validated here: the valid set lives
+        in the database, which a Pydantic validator cannot reach, so
+        :func:`~atriumdb_dashboard.locations.validate_location_codes` checks it
+        at resolve time and the endpoint maps a failure to a 422. ``None``
+        means no location filter — all admitted patients qualify.
     :param value_range: Reserved for future vital-sign range filtering; unused
         in Priority 1B.
     """
@@ -164,27 +165,6 @@ class DemographicCohort(_Base):
     sex: list[str] | None = None
     location: list[str] | None = None
     value_range: dict | None = None
-
-    @field_validator("location")
-    @classmethod
-    def _known_location_codes(cls, value: list[str] | None) -> list[str] | None:
-        """Reject location codes absent from ``LOCATION_LOOKUP``.
-
-        Checking here rather than at query time is what turns an unknown code
-        into a 422 naming the offending element, instead of a ``ValueError``
-        surfacing from
-        :func:`~atriumdb.dashboard.encounter_queries.query_patient_encounters`
-        as a 500.
-        """
-        if value is None:
-            return None
-        unknown = [code for code in value if code not in LOCATION_LOOKUP]
-        if unknown:
-            raise ValueError(
-                f"Unknown location code(s) {unknown}. "
-                f"Valid codes are: {list(LOCATION_LOOKUP)}"
-            )
-        return value
 
     @field_validator("sex")
     @classmethod

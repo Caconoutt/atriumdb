@@ -26,7 +26,9 @@ import os
 import pytest
 
 from atriumdb import AtriumSDK
-from atriumdb.dashboard.schemas import (
+from atriumdb_dashboard.cohort_resolver import resolve_cohort
+from atriumdb_dashboard.queries import select_patient_encounters
+from atriumdb_dashboard.schemas import (
     Admission,
     AdmissionDateRange,
     AgeBand,
@@ -71,7 +73,7 @@ def test_inspect_real_dataset(sdk):
     if len(patients) > 30:
         print(f"  ... and {len(patients) - 30} more")
 
-    encounters = sdk.sql_handler.select_patient_encounters()
+    encounters = select_patient_encounters(sdk)
     print(f"\n{'='*60}")
     print(f"ENCOUNTERS ({len(encounters)} total — showing first 20)")
     print(f"{'='*60}")
@@ -153,7 +155,7 @@ def test_mrn_cohort_real_data(sdk):
         admission_date_range=date_range,
         cohorts=[MrnCohort(id=cid, mrn_list=mrns) for cid, mrns in MRN_COHORTS],
     )
-    result = sdk.dashboard_resolve_cohort(request, request_id="real-1a")
+    result = resolve_cohort(sdk, request, request_id="real-1a")
     # by_id: cohort_id → list[PatientAdmission]
     by_id: dict[str, list[PatientAdmission]] = {
         c.id: c.patients for c in result.cohorts
@@ -284,7 +286,7 @@ def test_demographic_cohort_real_data(sdk):
         admission_date_range=date_range,
         cohorts=DEMOGRAPHIC_COHORTS,
     )
-    result = sdk.dashboard_resolve_cohort(request, request_id="real-1b")
+    result = resolve_cohort(sdk, request, request_id="real-1b")
     # by_id: cohort_id → list[PatientAdmission]
     by_id: dict[str, list[PatientAdmission]] = {
         c.id: c.patients for c in result.cohorts

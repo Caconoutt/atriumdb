@@ -25,15 +25,27 @@ import uvicorn
 from pydantic import ValidationError
 
 from atriumdb.atrium_sdk import AtriumSDK
-from atriumdb.dashboard.schemas import (
+from atriumdb_dashboard.schemas import (
     AdmissionDateRange, AgeBand, CohortDefinitionRequest,
     DemographicCohort, MrnCohort,
 )
+from atriumdb_dashboard.api.app import mount_dashboard
+from atriumdb_dashboard.api.cohort_endpoints import get_sdk_instance
+from atriumdb_dashboard.cohort_resolver import resolve_cohort
+from atriumdb_dashboard.locations import UnknownLocationError
+from atriumdb_dashboard.queries import (
+    group_encounters_by_admission,
+    query_patient_encounters,
+    select_patient_encounters,
+)
 from tests.mock_api.app import app
-from tests.mock_api.sdk_dependency import get_sdk_instance
+
+# Mount the dashboard onto the upstream AtriumDB test app at runtime, rather
+# than editing tests/mock_api/app.py, so that file stays identical to main.
+mount_dashboard(app)
 
 DB_NAME = 'dashboard_api_test'
-SQLITE_DATASET_PATH = Path(__file__).parent / "test_datasets" / f"sqlite_{DB_NAME}"
+SQLITE_DATASET_PATH = Path(__file__).parent.parent / "test_datasets" / f"sqlite_{DB_NAME}"
 
 
 def test_api_cohorts():
@@ -60,6 +72,17 @@ def _test_api_cohorts(db_type, dataset_location, connection_params):
     institution_id = sdk.sql_handler.insert_institution("Test Hospital")
     unit_id = sdk.sql_handler.insert_unit(institution_id, "ICU", "icu")
     bed_id = sdk.sql_handler.insert_bed(unit_id, "Bed 1")
+    # A unit that the removed hardcoded LOCATION_LOOKUP never listed. Requests
+    # naming it must work purely because the row exists in the unit table.
+    nicu_unit_id = sdk.sql_handler.insert_unit(institution_id, "NICU", "icu")
+    nicu_bed_id = sdk.sql_handler.insert_bed(nicu_unit_id, "NICU Bed 1")
+    # Units used only by the grouping test, kept separate from ICU and NICU so
+    # that its extra patients cannot perturb the cohort assertions above.
+    step_unit_id = sdk.sql_handler.insert_unit(institution_id, "STEPDOWN", "ward")
+    step_bed_1 = sdk.sql_handler.insert_bed(step_unit_id, "Step Bed 1")
+    step_bed_2 = sdk.sql_handler.insert_bed(step_unit_id, "Step Bed 2")
+    recov_unit_id = sdk.sql_handler.insert_unit(institution_id, "RECOVERY", "ward")
+    recov_bed_1 = sdk.sql_handler.insert_bed(recov_unit_id, "Recovery Bed 1")
 
     ONE_YEAR_NS = 365 * 24 * 3600 * 1_000_000_000
     admit_start_ns = 1_600_000_000_000_000_000
@@ -82,6 +105,11 @@ def _test_api_cohorts(db_type, dataset_location, connection_params):
     sdk.insert_encounter(patient_id=pid_c, bed_id=bed_id, start_time=outside_ns,
                          end_time=outside_ns + ONE_YEAR_NS, visit_number="V003")
 
+    # patient D: in the NICU, in-window — only reachable via a DB-backed lookup
+    pid_d = sdk.insert_patient(mrn="MRN004", gender="F", dob=inside_ns - 2 * ONE_YEAR_NS)
+    sdk.insert_encounter(patient_id=pid_d, bed_id=nicu_bed_id, start_time=inside_ns,
+                         end_time=inside_ns + ONE_YEAR_NS, visit_number="V004")
+
     date_range = AdmissionDateRange(start=admit_start_ns, end=admit_end_ns)
 
     print("Testing 1A: MRN cohort endpoint...")
@@ -93,13 +121,13 @@ def _test_api_cohorts(db_type, dataset_location, connection_params):
     )
 
     # MRN001 and MRN002 have in-window encounters; MRN003 is outside the window; MRN999 does not exist
-    local_result = sdk.dashboard_resolve_cohort(request_1a, request_id="test-1a-local")
+    local_result = resolve_cohort(sdk, request_1a, request_id="test-1a-local")
     assert local_result.request_id == "test-1a-local"
     assert len(local_result.cohorts) == 1
     assert local_result.cohorts[0].id == "cohort_1a"
     assert {p.mrn for p in local_result.cohorts[0].patients} == {"MRN001", "MRN002"}
 
-    api_result = api_sdk.dashboard_resolve_cohort(request_1a, request_id="test-1a-api")
+    api_result = resolve_cohort(api_sdk, request_1a, request_id="test-1a-api")
     assert {p.mrn for p in api_result.cohorts[0].patients} == {"MRN001", "MRN002"}
 
     print("Testing 1B: demographic cohort — location filter...")
@@ -111,10 +139,10 @@ def _test_api_cohorts(db_type, dataset_location, connection_params):
     )
 
     # both in-window patients are in ICU; MRN003 is outside the window
-    local_result = sdk.dashboard_resolve_cohort(request_1b_loc, request_id="test-1b-loc-local")
+    local_result = resolve_cohort(sdk, request_1b_loc, request_id="test-1b-loc-local")
     assert {p.mrn for p in local_result.cohorts[0].patients} == {"MRN001", "MRN002"}
 
-    api_result = api_sdk.dashboard_resolve_cohort(request_1b_loc, request_id="test-1b-loc-api")
+    api_result = resolve_cohort(api_sdk, request_1b_loc, request_id="test-1b-loc-api")
     assert {p.mrn for p in api_result.cohorts[0].patients} == {"MRN001", "MRN002"}
 
     print("Testing 1B: demographic cohort — sex filter...")
@@ -125,10 +153,10 @@ def _test_api_cohorts(db_type, dataset_location, connection_params):
         cohorts=[DemographicCohort(id="cohort_1b_sex", location=["ICU"], sex=["M"])],
     )
 
-    local_result = sdk.dashboard_resolve_cohort(request_1b_sex, request_id="test-1b-sex-local")
+    local_result = resolve_cohort(sdk, request_1b_sex, request_id="test-1b-sex-local")
     assert {p.mrn for p in local_result.cohorts[0].patients} == {"MRN001"}
 
-    api_result = api_sdk.dashboard_resolve_cohort(request_1b_sex, request_id="test-1b-sex-api")
+    api_result = resolve_cohort(api_sdk, request_1b_sex, request_id="test-1b-sex-api")
     assert {p.mrn for p in api_result.cohorts[0].patients} == {"MRN001"}
 
     print("Testing 1B: demographic cohort — age filter...")
@@ -144,10 +172,10 @@ def _test_api_cohorts(db_type, dataset_location, connection_params):
         )],
     )
 
-    local_result = sdk.dashboard_resolve_cohort(request_1b_age, request_id="test-1b-age-local")
+    local_result = resolve_cohort(sdk, request_1b_age, request_id="test-1b-age-local")
     assert {p.mrn for p in local_result.cohorts[0].patients} == {"MRN001"}
 
-    api_result = api_sdk.dashboard_resolve_cohort(request_1b_age, request_id="test-1b-age-api")
+    api_result = resolve_cohort(api_sdk, request_1b_age, request_id="test-1b-age-api")
     assert {p.mrn for p in api_result.cohorts[0].patients} == {"MRN001"}
 
     print("Testing 1B: demographic cohort — multiple cohorts in one request...")
@@ -161,18 +189,106 @@ def _test_api_cohorts(db_type, dataset_location, connection_params):
         ],
     )
 
-    local_result = sdk.dashboard_resolve_cohort(request_multi, request_id="test-1b-multi-local")
+    local_result = resolve_cohort(sdk, request_multi, request_id="test-1b-multi-local")
     assert len(local_result.cohorts) == 2
     cohorts_by_id = {c.id: {p.mrn for p in c.patients} for c in local_result.cohorts}
     assert cohorts_by_id["male_icu"] == {"MRN001"}
     assert cohorts_by_id["female_icu"] == {"MRN002"}
 
-    api_result = api_sdk.dashboard_resolve_cohort(request_multi, request_id="test-1b-multi-api")
+    api_result = resolve_cohort(api_sdk, request_multi, request_id="test-1b-multi-api")
     cohorts_by_id = {c.id: {p.mrn for p in c.patients} for c in api_result.cohorts}
     assert cohorts_by_id["male_icu"] == {"MRN001"}
     assert cohorts_by_id["female_icu"] == {"MRN002"}
 
-    _test_invalid_input_is_rejected(date_range)
+    print("Testing: admissions group by (patient, visit_number, unit)...")
+
+    # Patient F, one visit, three encounter rows: two STEPDOWN beds then a
+    # transfer to RECOVERY. The bed move within STEPDOWN must collapse into a
+    # single admission spanning both; the unit transfer must stay separate, so
+    # that each admission carries one unambiguous location.
+    pid_f = sdk.insert_patient(mrn="MRN006", gender="M", dob=inside_ns - 10 * ONE_YEAR_NS)
+    t0 = inside_ns
+    t1 = inside_ns + ONE_YEAR_NS // 4
+    t2 = inside_ns + ONE_YEAR_NS // 2
+    t3 = inside_ns + ONE_YEAR_NS
+    sdk.insert_encounter(patient_id=pid_f, bed_id=step_bed_1, start_time=t0, end_time=t1, visit_number="V006")
+    sdk.insert_encounter(patient_id=pid_f, bed_id=step_bed_2, start_time=t1, end_time=t2, visit_number="V006")
+    sdk.insert_encounter(patient_id=pid_f, bed_id=recov_bed_1, start_time=t2, end_time=t3, visit_number="V006")
+
+    grouped = group_encounters_by_admission(
+        query_patient_encounters(sdk, patient_id_list=[pid_f])
+    )
+    assert sorted(grouped) == [(pid_f, "V006", "RECOVERY"), (pid_f, "V006", "STEPDOWN")], grouped
+
+    # STEPDOWN admission spans both beds: MIN(start) .. MAX(end)
+    step = grouped[(pid_f, "V006", "STEPDOWN")]
+    assert (step["admit_time_ns"], step["discharge_time_ns"]) == (t0, t2)
+
+    # the transfer is its own admission, not merged into the STEPDOWN one
+    recov = grouped[(pid_f, "V006", "RECOVERY")]
+    assert (recov["admit_time_ns"], recov["discharge_time_ns"]) == (t2, t3)
+
+    # an open row anywhere in a group leaves the whole admission open
+    pid_g = sdk.insert_patient(mrn="MRN007", gender="F", dob=inside_ns - 10 * ONE_YEAR_NS)
+    sdk.insert_encounter(patient_id=pid_g, bed_id=step_bed_1, start_time=t0, end_time=t1, visit_number="V007")
+    sdk.insert_encounter(patient_id=pid_g, bed_id=step_bed_2, start_time=t1, end_time=None, visit_number="V007")
+    open_stay = group_encounters_by_admission(
+        query_patient_encounters(sdk, patient_id_list=[pid_g])
+    )[(pid_g, "V007", "STEPDOWN")]
+    assert open_stay["admit_time_ns"] == t0
+    assert open_stay["discharge_time_ns"] is None
+
+    print("Testing: encounters with no visit_number are excluded...")
+
+    # patient E is admitted to the ICU in-window but the row carries no visit
+    # number, so it cannot be attributed to a stay and must not resolve.
+    pid_e = sdk.insert_patient(mrn="MRN005", gender="F", dob=inside_ns - 40 * ONE_YEAR_NS)
+    sdk.insert_encounter(patient_id=pid_e, bed_id=bed_id, start_time=inside_ns,
+                         end_time=inside_ns + ONE_YEAR_NS, visit_number=None)
+
+    assert pid_e not in {r[1] for r in select_patient_encounters(sdk)}
+
+    # the ICU cohort is unchanged by patient E's presence in the table
+    local_result = resolve_cohort(sdk, request_1b_loc, request_id="test-null-visit")
+    assert {p.mrn for p in local_result.cohorts[0].patients} == {"MRN001", "MRN002"}
+
+    # and an MRN cohort naming them reports no qualifying admission
+    request_null_visit = CohortDefinitionRequest(
+        type="mrn",
+        admission_date_range=date_range,
+        cohorts=[MrnCohort(id="null_visit", mrn_list=["MRN005"])],
+    )
+    result = resolve_cohort(sdk, request_null_visit, request_id="test-null-visit-mrn")
+    assert result.cohorts[0].patients == []
+
+    print("Testing 1B: location validated against the unit table, not a constant...")
+
+    # "NICU" was never in the old hardcoded vocabulary. It resolves now purely
+    # because a unit row with that name exists — which is the point of the
+    # DB-backed lookup.
+    request_nicu = CohortDefinitionRequest(
+        type="demographic",
+        admission_date_range=date_range,
+        cohorts=[DemographicCohort(id="nicu", location=["NICU"])],
+    )
+    local_result = resolve_cohort(sdk, request_nicu, request_id="test-nicu-local")
+    assert {p.mrn for p in local_result.cohorts[0].patients} == {"MRN004"}
+    assert local_result.cohorts[0].patients[0].admissions[0].location == "NICU"
+
+    api_result = resolve_cohort(api_sdk, request_nicu, request_id="test-nicu-api")
+    assert {p.mrn for p in api_result.cohorts[0].patients} == {"MRN004"}
+
+    # A name with no unit row is still rejected rather than silently widening
+    # the cohort to every admitted patient.
+    request_absent = CohortDefinitionRequest(
+        type="demographic",
+        admission_date_range=date_range,
+        cohorts=[DemographicCohort(id="absent", location=["WARD_9"])],
+    )
+    with pytest.raises(UnknownLocationError, match="WARD_9"):
+        resolve_cohort(sdk, request_absent, request_id="test-absent-local")
+
+    _test_invalid_input_is_rejected(sdk, date_range)
 
     api_sdk.close()
 
@@ -185,8 +301,11 @@ def test_cohort_request_validation():
     runs independently of :func:`test_api_cohorts`. The matching HTTP status
     codes are asserted in :func:`_test_invalid_input_is_rejected`.
     """
-    with pytest.raises(ValidationError, match="Unknown location code"):
-        DemographicCohort(id="bad_loc", location=["ICU", "ER"])
+    # Locations are NOT validated here: the valid set is the unit table, which
+    # a Pydantic validator cannot reach. Any string is accepted at construction
+    # and checked at resolve time instead — see the 422 assertion in
+    # _test_invalid_input_is_rejected, which covers the same input over HTTP.
+    assert DemographicCohort(id="unchecked_loc", location=["ER"]).location == ["ER"]
 
     with pytest.raises(ValidationError, match="Unknown sex code"):
         DemographicCohort(id="bad_sex", location=["ICU"], sex=["X"])
@@ -209,22 +328,26 @@ def test_cohort_request_validation():
     unfiltered = DemographicCohort(id="ok")
     assert unfiltered.location is None and unfiltered.sex is None
 
-    # the same rejection applies when parsed from camelCase JSON, which is the
-    # form FastAPI hands the model
-    with pytest.raises(ValidationError, match="Unknown location code"):
-        CohortDefinitionRequest.model_validate({
-            "type": "demographic",
-            "admissionDateRange": {"start": 1, "end": 2},
-            "cohorts": [{"id": "c", "location": ["ER"]}],
-        })
+    # camelCase JSON — the form FastAPI hands the model — parses the same way,
+    # with the location carried through unvalidated for the resolver to check
+    parsed = CohortDefinitionRequest.model_validate({
+        "type": "demographic",
+        "admissionDateRange": {"start": 1, "end": 2},
+        "cohorts": [{"id": "c", "location": ["ER"]}],
+    })
+    assert parsed.cohorts[0].location == ["ER"]
 
 
-def _test_invalid_input_is_rejected(date_range):
+def _test_invalid_input_is_rejected(sdk, date_range):
     """Bad user input must surface as a 422 over HTTP, never as a 500.
 
     :func:`test_cohort_request_validation` covers the model-construction side;
     this covers the status code the dashboard server actually receives, which
     only a live request can show.
+
+    :param sdk: Direct-DB SDK instance, used for the checks that cannot be
+        driven through an HTTP client.
+    :param date_range: Admission window shared by the request bodies built here.
     """
     print("Testing input validation over HTTP...")
 
@@ -279,15 +402,37 @@ def _test_invalid_input_is_rejected(date_range):
 
     print("Testing input validation: blank X-Request-ID header...")
 
-    # min_length=1 alone lets an all-whitespace header through, which used to
-    # reach the SDK's own request_id check and surface as a 500
-    for bad_request_id in ("", "   "):
-        response = requests.post(
+    # An empty header value is legal HTTP, so it reaches the server and the
+    # endpoint's min_length=1 rejects it.
+    response = requests.post(
+        f"{base_url}/cohorts",
+        json=valid_body,
+        headers={"X-Request-ID": ""},
+    )
+    assert response.status_code == 422, (
+        f"X-Request-ID='' returned {response.status_code}: {response.text}"
+    )
+
+    # An all-whitespace value never reaches the server at all: requests
+    # validates header values before sending and refuses this one. Asserting
+    # the client-side error is the honest test — there is no response to check
+    # a status code on, and pretending otherwise would just re-break whenever
+    # requests tightens validation again.
+    with pytest.raises(requests.exceptions.InvalidHeader):
+        requests.post(
             f"{base_url}/cohorts",
             json=valid_body,
-            headers={"X-Request-ID": bad_request_id},
+            headers={"X-Request-ID": "   "},
         )
-        assert response.status_code == 422, (
-            f"X-Request-ID={bad_request_id!r} returned "
-            f"{response.status_code}: {response.text}"
-        )
+
+    # The server-side guard against a blank request_id is still real — it is
+    # simply not reachable through requests. Assert it where it actually lives,
+    # which also covers direct-DB callers who never touch HTTP. The check runs
+    # before any query, so no dataset state is involved.
+    for blank in ("", "   ", "\t"):
+        with pytest.raises(ValueError, match="non-empty string"):
+            resolve_cohort(
+                sdk,
+                CohortDefinitionRequest.model_validate(valid_body),
+                request_id=blank,
+            )

@@ -23,17 +23,17 @@ The caller's code is **identical** in both cases. The server is a FastAPI proces
 same SDK in direct-DB mode — its endpoint calls the same local function and returns JSON.
 
 ```
-sdk.dashboard_resolve_cohort(request, request_id)
+resolve_cohort(sdk, request, request_id)
   │
   ├─ "api" mode
-  │     └─ self._request("POST", "cohorts/", ..., headers={"X-Request-ID": request_id})
+  │     └─ _post_cohorts_remote(...)  # sends X-Request-ID header
   │             └─ HTTP ──► FastAPI POST /cohorts
   │                           └─ resolve_cohorts_local(server_sdk, body, x_request_id)
-  │                                 └─ sql_handler.select_patient_encounters(...)
+  │                                 └─ queries.select_patient_encounters(server_sdk, ...)
   │
   └─ direct-DB mode
-        └─ resolve_cohorts_local(self, request, request_id)
-              └─ sql_handler.select_patient_encounters(...)
+        └─ resolve_cohorts_local(sdk, request, request_id)
+              └─ queries.select_patient_encounters(sdk, ...)
 ```
 
 ---
@@ -42,38 +42,50 @@ sdk.dashboard_resolve_cohort(request, request_id)
 
 ```
 atriumdb/sdk/
-├── atriumdb/
-│   ├── atrium_sdk.py                        ← MODIFIED: dashboard_resolve_cohort(); _request() header merge
-│   ├── sql_handler/
-│   │   ├── sql_handler.py                   ← MODIFIED: select_patient_encounters() abstract method
-│   │   ├── sqlite/sqlite_handler.py         ← MODIFIED: select_patient_encounters() implementation
-│   │   └── maria/maria_handler.py           ← MODIFIED: select_patient_encounters() implementation
-│   └── dashboard/                           ← NEW package — pure logic, no FastAPI
-│       ├── __init__.py
-│       ├── schemas.py                       ← Pydantic request/response models
-│       ├── locations.py                     ← LOCATION_LOOKUP + resolve_location_codes
-│       ├── encounter_queries.py             ← query_patient_encounters + group_encounters_by_admission
-│       └── cohort_resolver.py               ← resolve_cohorts_local, _resolve_mrn_cohort, _resolve_demographic_cohort
+├── atriumdb/                                ← UNCHANGED — byte-identical to upstream main
+├── atriumdb_dashboard/                      ← NEW top-level package; atriumdb never imports it
+│   ├── pyproject.toml                       ← its own distribution: atriumdb-dashboard
+│   ├── __init__.py                          ← public API re-exports
+│   ├── schemas.py                           ← Pydantic request/response models
+│   ├── locations.py                         ← DB-backed location validation (unit table)
+│   ├── queries.py                           ← select_patient_encounters (raw SQL, both backends)
+│   │                                          + query_patient_encounters
+│   │                                          + group_encounters_by_admission
+│   ├── cohort_resolver.py                   ← resolve_cohort (entry point), resolve_cohorts_local,
+│   │                                          _resolve_mrn_cohort, _resolve_demographic_cohort
+│   ├── api/                                 ← FastAPI surface (optional import; needs fastapi)
+│   │   ├── __init__.py
+│   │   ├── cohort_endpoints.py              ← POST /cohorts handler + get_sdk_instance dependency
+│   │   └── app.py                           ← mount_dashboard() / create_dashboard_app()
+│   ├── docker/
+│   │   ├── Dockerfile                       ← Linux image for running the tests
+│   │   ├── Dockerfile.dockerignore          ← BuildKit-scoped ignore file
+│   │   └── docker-run-dataset.sh            ← runs the image with a dataset mounted
+│   └── docs/
+│       ├── s1_cohort_definition_plan.md     ← this document
+│       ├── s1_cohort_definition_test_guide.md
+│       └── dockersetup.md                   ← Docker usage notes
 ├── tests/
-│   ├── mock_api/
-│   │   ├── app.py                           ← MODIFIED: include_router(cohort_router, prefix="/cohorts")
-│   │   ├── cohort_endpoints.py              ← NEW: POST /cohorts FastAPI handler
-│   │   └── sdk_dependency.py                ← unchanged
-│   ├── test_dashboard_api.py                ← NEW: synthetic-fixture cohort tests (SQLite + HTTP)
-│   ├── test_dashboard_real_data.py          ← NEW: real-dataset tests, skipped unless a dataset is mounted
-│   └── z_test_local_setup.py                ← NEW: seeds MRNs/encounters into a real dataset
-├── Dockerfile                               ← NEW: Linux image for running the tests
-├── .dockerignore                            ← NEW
-├── docker-run-dataset.sh                    ← NEW: runs the image with a dataset mounted
-├── dockersetup.md                           ← NEW: Docker usage notes
-└── docs/dashboard/
-    ├── s1_cohort_definition_plan.md         ← this document
-    └── s1_cohort_definition_test_guide.md   ← how to run the real-data tests
+│   ├── mock_api/                            ← UNCHANGED — byte-identical to upstream main
+│   └── dashboard/
+│       ├── __init__.py
+│       ├── test_dashboard_api.py            ← synthetic-fixture cohort tests (SQLite + HTTP);
+│       │                                      calls mount_dashboard(app) at import time
+│       ├── test_dashboard_real_data.py      ← real-dataset tests, skipped unless a dataset is mounted
+│       └── z_test_local_setup.py            ← seeds MRNs/encounters into a real dataset
+└── pyproject.toml                           ← UNCHANGED — byte-identical to upstream main
+
+Nothing outside `atriumdb_dashboard/` and `tests/dashboard/` differs from upstream main.
+`atriumdb-dashboard` is a distribution in its own right, versioned separately and installed
+alongside the SDK:
+
+    pip install -e ".[testing]"                  # atriumdb
+    pip install -e "./atriumdb_dashboard[api]"   # atriumdb-dashboard
 ```
 
 ---
 
-## 2. Pydantic Schemas (`atriumdb/dashboard/schemas.py`)
+## 2. Pydantic Schemas (`atriumdb_dashboard/schemas.py`)
 
 Nine models. All inherit `_Base`, which sets `alias_generator=to_camel` and
 `populate_by_name=True` — snake_case in Python, camelCase on the wire. They serve both the
@@ -153,8 +165,20 @@ Both implementations follow the existing SDK style exactly:
 - Returns raw tuples: `(encounter_id, patient_id, visit_number, bed_id, unit_id, unit_name, start_time_ns, end_time_ns)`
 
 JOIN chain: `encounter → bed → unit`. `encounter` carries no location column of its own — only
-`bed_id` — so `unit` is reached via `bed.unit_id`. The INNER JOIN drops rows where `bed_id` is
-NULL (pre-admission placeholder rows with no bed assignment are excluded by design).
+`bed_id` — so `unit` is reached via `bed.unit_id`.
+
+Two exclusions apply unconditionally, ahead of any caller-supplied filter:
+
+- **NULL `bed_id`** — dropped by the INNER JOIN. A pre-admission placeholder with no bed
+  assignment is not an admission.
+- **NULL `visit_number`** — dropped by `WHERE e.visit_number IS NOT NULL`. Admissions are
+  keyed by `(patient_id, visit_number, unit_name)`, so a row without a visit number cannot be
+  attributed to a stay; left in, every such row for a patient would collapse into one
+  synthetic `None` admission spanning unrelated visits.
+
+A patient whose only encounters lack a visit number therefore resolves to no admissions and
+drops out of the cohort. In the MRN path this surfaces in the existing "no encounter in date
+range" warning, so it is visible in the logs rather than silent.
 
 All four arguments are optional and AND-ed when supplied. Note that an argument is only
 applied when it is not `None` **and**, for the list arguments, non-empty: passing
@@ -168,32 +192,61 @@ applied when it is not `None` **and**, for the list arguments, non-empty: passin
 | Location filter | None | `unit_name_list` via JOIN to bed+unit |
 | Time semantics | Overlap (`end_time > start AND start_time < end`) | Admission range (`start_time >= admit_start AND start_time <= admit_end`) |
 | NULL bed_id rows | Returned (no bed JOIN) | Excluded (INNER JOIN) |
+| NULL visit_number rows | Returned | Excluded (`IS NOT NULL`) |
 | ORDER BY | `encounter.id` | `e.start_time` |
 
 ---
 
-## 4. Dashboard Layer (`atriumdb/dashboard/`)
+## 4. Dashboard Layer (`atriumdb_dashboard/`)
 
-### 4.1 `locations.py` and `encounter_queries.py`
+### 4.1 `locations.py` and `queries.py`
 
-`encounter_queries.py` holds two functions and contains no raw SQL — it delegates to
-`sql_handler`. The location vocabulary lives in `locations.py` so that `schemas.py` can
-validate location codes at the request boundary without importing the query layer.
+`queries.py` owns the whole query path: the raw `encounter → bed → unit` SQL plus the two
+shaping functions above it. It runs that SQL through `sdk.sql_handler.connection()`, the
+backend-agnostic context manager that upstream's `SQLHandler` already declares and both
+handlers implement. That is what removes the need to add a `select_patient_encounters`
+method to `SQLHandler` and its two subclasses. Both backends use the `?` paramstyle, so a
+single statement serves each.
 
-**`LOCATION_LOOKUP`** (in `locations.py`) — maps API location codes to exact `unit.name`
-values in the DB. Filter is on `unit.name`, not `unit.type`.
+**Locations are validated against the database, not a constant.** There is no hardcoded
+vocabulary: whatever the caller sends is checked against `unit.name`, so a deployment that
+adds a unit gets it immediately, and deployments with different unit names share this code
+unchanged.
 
-```python
-LOCATION_LOOKUP: dict[str, list[str]] = {
-    "ICU": ["ICU"],
-    "OR":  ["OR"],
-}
-```
+`locations.py` holds two functions and one error type:
+
+- **`location_exists(sdk, name)`** — wraps `sdk.sql_handler.select_unit(name=...)`, which
+  upstream implements *concretely* on the base `SQLHandler` (not as an abstract method), so
+  both backends are covered without touching `atriumdb`. Returns `True` when a unit row
+  with that name exists.
+- **`validate_location_codes(sdk, codes)`** — checks each distinct code, raising
+  `UnknownLocationError` listing every unmatched name. Repeated codes cost one query, not
+  several. `None` or an empty list means "no location filter" and issues no query at all.
+- **`UnknownLocationError`** — subclasses `ValueError`, so existing `except ValueError`
+  handlers still catch it while the endpoint can catch this type specifically.
+
+Unknown locations are **rejected, not dropped**. A location filter narrows a cohort, so
+ignoring a bad one silently returns a *wider* result than was asked for, and the caller
+cannot tell "nobody was in that unit" from "that unit name was a typo". This differs
+deliberately from the MRN path, where an unrecognised MRN is logged and skipped: dropping an
+MRN narrows the cohort, which fails safe in a way that widening does not.
+
+**Where validation happens changed.** It used to be a Pydantic `field_validator` on
+`DemographicCohort`. A validator runs at model construction, with no SDK and no connection,
+so it cannot consult the database. Validation therefore moved to resolve time, in
+`_resolve_demographic_cohort`, and `cohort_endpoints.py` catches `UnknownLocationError` and
+raises `HTTPException(422)`. The wire contract is unchanged — a bad location is still a 422
+naming the offending value — but a *direct* SDK caller now sees the error when they resolve
+rather than when they build the request object.
+
+Case sensitivity is delegated to the database's collation, which is **not** uniform: SQLite
+compares `TEXT` case-sensitively, while MariaDB's default `utf8mb4_general_ci` does not. A
+deployment needing identical behaviour on both should normalise unit names on ingest.
 
 **`query_patient_encounters(sdk, patient_id_list, admit_start_ns, admit_end_ns, locations)`**
-— translates `locations` (API codes) to `unit_name_list` via `resolve_location_codes`,
-raising `ValueError` on an unknown code, then calls
-`sdk.sql_handler.select_patient_encounters(...)`. Returns one dict per **encounter row**:
+— passes `locations` straight through as `unit_name_list` (the location string *is* the
+`unit.name`; validation already happened in the resolver), then calls
+`queries.select_patient_encounters(sdk, ...)`. Returns one dict per **encounter row**:
 
 ```python
 {"encounter_id": int, "patient_id": int, "visit_number": str|None,
@@ -206,8 +259,9 @@ rows into per-admission records keyed by **`(patient_id, visit_number, unit_name
 
 - `admit_time_ns = MIN(start_time_ns)` across the group's rows
 - `discharge_time_ns = MAX(end_time_ns)`; `None` if any row in the group is still open
-- NULL `visit_number` rows group under a `None` visit number with the same rules, and each
-  such row is logged as a warning — it indicates incomplete data
+- NULL `visit_number` rows never arrive here — `select_patient_encounters` filters them in
+  SQL. The `None` branch is retained only because this function is public and may be handed
+  rows from elsewhere; it groups them and logs a warning that stays may have been merged
 
 #### Why `unit_name` is part of the key
 
@@ -255,7 +309,7 @@ with no qualifying patients is still returned, with an empty `patients` list.
 
 | Step | Action |
 |---|---|
-| 1 | `query_patient_encounters(sdk, locations=..., admit_start_ns=..., admit_end_ns=...)`; location codes are already validated by `DemographicCohort`, so an unknown code is a 422 before this runs |
+| 1 | `validate_location_codes(sdk, cohort.location)` against the `unit` table, then `query_patient_encounters(sdk, locations=..., admit_start_ns=..., admit_end_ns=...)`; an unknown location raises `UnknownLocationError`, which the endpoint maps to a 422 |
 | 1b | `group_encounters_by_admission(...)` → all admissions kept per patient, grouped by `(visit_number, unit_name)` |
 | 2 | `sdk.sql_handler.select_all_patients_in_list(patient_id_list=...)` for demographics; candidates with no MRN on record are logged and dropped |
 | 3 | Sex filter — **patient level**: only `"M"` and `"F"` are requestable, so NULL / empty / `'U'` in `patient.gender` matches neither and is dropped |
@@ -269,28 +323,32 @@ within a filter are OR-ed.
 
 ---
 
-## 5. Dual-Mode Method (`atriumdb/atrium_sdk.py`)
+## 5. Dual-Mode Entry Point (`atriumdb_dashboard/cohort_resolver.py`)
 
-`dashboard_resolve_cohort(request, request_id)` is added after `get_mrn_to_patient_id_map`.
-`atriumdb.dashboard` imports nothing from `atrium_sdk` at runtime (the SDK type is behind
-`TYPE_CHECKING`), so the schema and resolver imports sit at module top level.
+`resolve_cohort(sdk, request, request_id)` takes the SDK as its first argument rather than
+being a method on it, which is what keeps `atriumdb` untouched. The dependency runs one way
+only: `atriumdb_dashboard` imports from the SDK (and only behind `TYPE_CHECKING` for the type
+itself), while `atriumdb` never imports the dashboard.
 
 ```python
-def dashboard_resolve_cohort(self, request, request_id: str):
+def resolve_cohort(sdk, request, request_id: str):
     if request_id is None or not str(request_id).strip():
         _LOGGER.error(...)
         raise ValueError("request_id must be a non-empty string.")
 
-    if self.metadata_connection_type == "api":
-        raw = self._request(
-            "POST", "cohorts/",
-            json=request.model_dump(by_alias=True),
-            headers={"X-Request-ID": request_id},
-        )
-        return MrnCohortResponse.model_validate(raw)
+    if sdk.metadata_connection_type == "api":
+        return _post_cohorts_remote(sdk, request, request_id)
 
-    return resolve_cohorts_local(self, request, request_id)
+    return resolve_cohorts_local(sdk, request, request_id)
 ```
+
+The remote path issues its own `requests.post` instead of calling `AtriumSDK._request`.
+`_request` builds its header dict from scratch, so it cannot carry `X-Request-ID`; making it
+merge caller headers would mean a one-line edit to `atrium_sdk.py`. `_post_cohorts_remote`
+restates the URL construction, the 30-second token-refresh check, and the non-200 error
+handling so the SDK stays byte-identical to upstream. That duplication is the deliberate
+cost of the zero-diff constraint — if `_request` ever changes its auth or refresh behaviour,
+this function must be updated to match.
 
 **`by_alias=True`** is required: the server parses camelCase (`admissionDateRange`,
 `mrnList`), which is what the alias generator produces.
@@ -332,7 +390,7 @@ async def post_cohorts(
     x_request_id: str = Header(..., min_length=1),
     sdk: AtriumSDK = Depends(get_sdk_instance),
 ) -> MrnCohortResponse:
-    return sdk.dashboard_resolve_cohort(body, request_id=x_request_id)
+    return resolve_cohort(sdk, body, request_id=x_request_id)
 ```
 
 ### 6.2 `tests/mock_api/app.py`
@@ -394,8 +452,8 @@ outside the window.
 | 1B age filter | Only patients whose age at admission falls in the requested band returned |
 | 1B multi-cohort | Multiple cohorts in one request are all resolved correctly |
 
-Each case asserts that `sdk.dashboard_resolve_cohort(...)` (direct-DB) and
-`api_sdk.dashboard_resolve_cohort(...)` (HTTP via FastAPI) return the same resolved patients.
+Each case asserts that `resolve_cohort(sdk, ...)` (direct-DB) and
+`resolve_cohort(api_sdk, ...)` (HTTP via FastAPI) return the same resolved patients.
 
 ### 7.2 `tests/test_dashboard_real_data.py` — real dataset
 
