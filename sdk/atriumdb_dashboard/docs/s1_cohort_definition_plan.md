@@ -379,7 +379,7 @@ which request a payload belongs to.
 
 ## 6. Server Side
 
-### 6.1 `tests/mock_api/cohort_endpoints.py`
+### 6.1 `atriumdb_dashboard/api/cohort_endpoints.py`
 
 Follows the same pattern as `measures_endpoints.py`, `patient_endpoints.py`, etc.
 
@@ -437,7 +437,7 @@ Omitting `X-Request-ID` returns 422.
 Dashboard tests live in their own files, separate from `test_api.py`, to avoid importing
 `test_mit_bih` (which pulls in `wfdb`) just to test cohort endpoints.
 
-### 7.1 `tests/test_dashboard_api.py` — synthetic fixtures
+### 7.1 `tests/atriumdb_dashboard/test_dashboard_statistics_api.py` — synthetic fixtures
 
 Creates a SQLite dataset under `tests/test_datasets/`, starts the mock FastAPI app on port
 8123, and inserts an institution, one ICU unit, one bed, and three patients: two with
@@ -455,7 +455,7 @@ outside the window.
 Each case asserts that `resolve_cohort(sdk, ...)` (direct-DB) and
 `resolve_cohort(api_sdk, ...)` (HTTP via FastAPI) return the same resolved patients.
 
-### 7.2 `tests/test_dashboard_real_data.py` — real dataset
+### 7.2 `tests/atriumdb_dashboard/test_dashboard_real_data.py` — real dataset
 
 Runs the same resolver against a mounted AtriumDB dataset, with expected MRN sets and full
 expected `Admission` records (admission, discharge and location) as module-level constants.
@@ -466,7 +466,7 @@ normal test run. See `s1_cohort_definition_test_guide.md`.
 
 ```bash
 cd /path/to/atriumdb/sdk
-PYTHONPATH=. python3 -m pytest tests/test_dashboard_api.py::test_api_cohorts -v -s
+PYTHONPATH=. python3 -m pytest tests/atriumdb_dashboard/test_dashboard_statistics_api.py::test_api_cohorts -v -s
 ```
 
 `AtriumSDK.__init__` raises `OSError("AtriumSDK is not currently supported on macOS.")` at

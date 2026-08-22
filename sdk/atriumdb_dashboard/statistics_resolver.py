@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from atriumdb.dashboard.schemas import (
+from atriumdb_dashboard.schemas import (
     ALL_TIME,
     Admission,
     AggregateStatisticsRequest,
@@ -74,18 +74,32 @@ def compute_aggregate_statistics(
 ) -> AggregateStatisticsResponse:
     """Compute per-cohort per-patient mean signal values.
 
-    Resolves the requested measure once, then iterates through each cohort,
-    applying patient-ID resolution, device resolution, availability filtering,
-    and per-patient mean computation in sequence.
+    The single entry point for S2. Resolves the requested measure once, then
+    iterates through each cohort, applying patient-ID resolution, device
+    resolution, availability filtering, and per-patient mean computation in
+    sequence.
+
+    Exclusions are written to the
+    ``atriumdb_dashboard.statistics_resolver.exclusions`` logger. To capture
+    them in a file, attach a ``FileHandler`` to that logger before calling this
+    function.
 
     :param sdk: AtriumSDK instance in direct-DB mode.
-    :param request: Parsed :class:`~atriumdb.dashboard.schemas.AggregateStatisticsRequest`.
+    :param request: Parsed :class:`~atriumdb_dashboard.schemas.AggregateStatisticsRequest`.
     :param request_id: Correlation ID prepended to every log and exclusion record
         for this request.
-    :return: :class:`~atriumdb.dashboard.schemas.AggregateStatisticsResponse`
-        with one :class:`~atriumdb.dashboard.schemas.CohortStatistics` per input cohort.
-    :raises ValueError: If the requested measure does not exist in the dataset.
+    :return: :class:`~atriumdb_dashboard.schemas.AggregateStatisticsResponse`
+        with one :class:`~atriumdb_dashboard.schemas.CohortStatistics` per input cohort.
+    :raises ValueError: If ``request_id`` is missing or empty, or if the requested
+        measure does not exist in the dataset.
     """
+    if not request_id:
+        _LOGGER.error(
+            "compute_aggregate_statistics called with missing or empty "
+            "request_id — every request must supply a non-empty request_id."
+        )
+        raise ValueError("request_id must be a non-empty string.")
+
     measure_id = _resolve_measure_id(sdk, request, request_id)
 
     cohort_results: list[CohortStatistics] = [

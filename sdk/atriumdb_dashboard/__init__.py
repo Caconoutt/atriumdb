@@ -26,6 +26,7 @@ not imported here, so that using the resolver does not require FastAPI.
 """
 
 from atriumdb_dashboard.cohort_resolver import resolve_cohort, resolve_cohorts_local
+from atriumdb_dashboard.statistics_resolver import compute_aggregate_statistics
 from atriumdb_dashboard.locations import (
     UnknownLocationError,
     location_exists,
@@ -39,7 +40,16 @@ from atriumdb_dashboard.queries import (
 from atriumdb_dashboard.schemas import (
     Admission,
     AdmissionDateRange,
+    AggregateStatisticsRequest,
+    AggregateStatisticsResponse,
     AgeBand,
+    CohortInput,
+    CohortStatistics,
+    ExclusionRecord,
+    ExclusionReason,
+    MeasureIdentifier,
+    PatientResult,
+    ValueRange,
     CohortDefinitionRequest,
     DemographicCohort,
     MrnCohort,
@@ -51,7 +61,17 @@ from atriumdb_dashboard.schemas import (
 __all__ = [
     "Admission",
     "AdmissionDateRange",
+    "AggregateStatisticsRequest",
+    "AggregateStatisticsResponse",
     "AgeBand",
+    "CohortInput",
+    "CohortStatistics",
+    "ExclusionRecord",
+    "ExclusionReason",
+    "MeasureIdentifier",
+    "PatientResult",
+    "ValueRange",
+    "compute_aggregate_statistics",
     "CohortDefinitionRequest",
     "DemographicCohort",
     "UnknownLocationError",

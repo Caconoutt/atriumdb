@@ -4,8 +4,9 @@ A real uvicorn server runs in a daemon thread and tests make plain
 requests.post() calls. The SDK is a MagicMock injected via
 app.dependency_overrides, so no dataset is needed — the resolver's inputs
 (interval arrays, value arrays) are far easier to control directly than to
-produce by writing waveform data. dashboard_compute_statistics on the mock is
-wired to the *real* resolver, so every per-stage SDK call is still exercised.
+produce by writing waveform data. The endpoint calls the *real* resolver with
+whatever SDK is injected, so every per-stage SDK call is still exercised — the
+mock only stands in for the data source.
 """
 
 import socket
@@ -18,9 +19,13 @@ import pytest
 import requests
 import uvicorn
 
-from atriumdb.dashboard.statistics_resolver import compute_aggregate_statistics
+from atriumdb_dashboard.api.app import mount_dashboard
+from atriumdb_dashboard.api.statistics_endpoints import get_sdk_instance as get_statistics_sdk
 from tests.mock_api.app import app
-from tests.mock_api.sdk_dependency import get_sdk_instance
+
+# Mount the dashboard onto the upstream AtriumDB test app at runtime, rather
+# than editing tests/mock_api/app.py, so that file stays identical to main.
+mount_dashboard(app)
 
 # ---------------------------------------------------------------------------
 # Server
@@ -130,9 +135,6 @@ def _mock_sdk(measure_id=MEASURE_ID, patient_id=PATIENT_ID, device_id=DEVICE_ID,
         return None, None, resolved_values
 
     sdk.get_data.side_effect = _get_data
-    sdk.dashboard_compute_statistics.side_effect = (
-        lambda req, req_id: compute_aggregate_statistics(sdk, req, req_id)
-    )
     return sdk
 
 
@@ -173,7 +175,7 @@ def _body(mrns_and_admissions: list[tuple[str, list]],
 
 
 def _post_stats(sdk, body: dict, headers: dict = HEADERS) -> requests.Response:
-    app.dependency_overrides[get_sdk_instance] = lambda: sdk
+    app.dependency_overrides[get_statistics_sdk] = lambda: sdk
     return requests.post(f"{BASE_URL}/cohorts/statistics", json=body,
                          headers=headers, timeout=10)
 

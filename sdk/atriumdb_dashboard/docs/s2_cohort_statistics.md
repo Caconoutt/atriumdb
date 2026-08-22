@@ -58,26 +58,26 @@ admissions produces two entries, keyed by `(mrn, admissionNs)`. Every dropped en
 
 ```
 atriumdb/sdk/
-├── atriumdb/
-│   ├── atrium_sdk.py                            ← MODIFIED: dashboard_compute_statistics()
-│   └── dashboard/
-│       ├── schemas.py                           ← NEW: request/response models
-│       └── statistics_resolver.py               ← NEW: the pipeline
-├── tests/
-│   ├── mock_api/
-│   │   ├── app.py                               ← MODIFIED: include_router(cohort_router, prefix="/cohorts")
-│   │   └── cohort_endpoints.py                  ← NEW: POST /cohorts/statistics handler
-│   ├── test_dashboard_api.py                    ← NEW: endpoint tests against a mocked SDK
-│   └── test_dashboard_statistics_real_data.py   ← NEW: real-dataset run, skipped without a dataset
-├── Dockerfile                                   ← NEW: Linux image for running the tests
-├── .dockerignore                                ← NEW
-├── docker-run-dataset.sh                        ← NEW: runs the image with a dataset mounted
-└── dockersetup.md                               ← NEW: Docker usage notes
+├── atriumdb/                                    ← UNCHANGED — byte-identical to upstream main
+├── atriumdb_dashboard/
+│   ├── schemas.py                               ← S2 request/response models, appended to the
+│   │                                              S1 models and sharing their _Base/Admission
+│   ├── statistics_resolver.py                   ← the pipeline + compute_aggregate_statistics()
+│   ├── api/
+│   │   ├── statistics_endpoints.py              ← POST /statistics + its own SDK dependency
+│   │   └── app.py                               ← mount_dashboard() attaches both routers
+│   ├── docker/
+│   └── docs/
+└── tests/
+    ├── mock_api/                                ← UNCHANGED — byte-identical to upstream main
+    └── atriumdb_dashboard/
+        ├── test_dashboard_statistics_api.py     ← endpoint tests against a mocked SDK
+        └── test_dashboard_statistics_real_data.py  ← real-dataset run, skipped without a dataset
 ```
 
 ---
 
-## 2. Schemas (`atriumdb/dashboard/schemas.py`)
+## 2. Schemas (`atriumdb_dashboard/schemas.py`)
 
 All models inherit `_Base`, which sets `alias_generator=to_camel` and `populate_by_name=True` —
 snake_case in Python, camelCase in JSON.
@@ -129,29 +129,34 @@ S2, so the two normally agree.
 
 ---
 
-## 3. SDK Method (`atriumdb/atrium_sdk.py`)
+## 3. Entry Point (`atriumdb_dashboard/statistics_resolver.py`)
 
 ```python
-def dashboard_compute_statistics(self, request, request_id: str = "") -> AggregateStatisticsResponse:
+def compute_aggregate_statistics(sdk, request, request_id: str) -> AggregateStatisticsResponse:
     if not request_id:
         _LOGGER.error(...)
         raise ValueError("request_id must be a non-empty string.")
-    return compute_aggregate_statistics(self, request, request_id)
+    measure_id = _resolve_measure_id(sdk, request, request_id)
+    ...
 ```
+
+It takes the SDK as its first argument rather than being a method on it. Nothing in the pipeline
+needs private SDK state — every call it makes (`get_patient_id`, `convert_patient_to_device_id`,
+`get_interval_array`, `get_data`, `get_measure_id`, `get_patient_info`) is public API that already
+exists upstream — so `atrium_sdk.py` needs no modification and merges cleanly.
 
 `request_id` is a correlation token: every log line and every exclusion record emitted while
 resolving the request is prefixed `[<request_id>]`, so a dashboard-side request can be matched
 against AtriumDB's logs. An empty value is rejected before any query runs.
 
-**Direct-DB only.** Unlike `dashboard_resolve_cohort`, this method has no
-`metadata_connection_type == "api"` branch — an API-mode SDK cannot call it. API-mode support is
-not implemented.
+**Direct-DB only.** Unlike `resolve_cohort`, this has no `metadata_connection_type == "api"`
+branch — an API-mode SDK cannot call it. API-mode support is not implemented.
 
 ---
 
 ## 4. Server Side
 
-### 4.1 `tests/mock_api/cohort_endpoints.py`
+### 4.1 `atriumdb_dashboard/api/statistics_endpoints.py`
 
 ```python
 @router.post("/statistics", response_model=AggregateStatisticsResponse)
@@ -163,7 +168,7 @@ async def post_cohort_statistics(
     if not x_request_id:
         raise HTTPException(status_code=400, detail="X-Request-ID header is required and must be non-empty.")
     try:
-        return sdk.dashboard_compute_statistics(request, x_request_id)
+        return compute_aggregate_statistics(sdk, request, x_request_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 ```
@@ -180,7 +185,7 @@ The router is mounted with `prefix="/cohorts"` in `app.py`, so the full path is
 
 ---
 
-## 5. The Pipeline (`atriumdb/dashboard/statistics_resolver.py`)
+## 5. The Pipeline (`atriumdb_dashboard/statistics_resolver.py`)
 
 Entry point `compute_aggregate_statistics(sdk, request, request_id)` resolves the measure once,
 then processes each cohort independently.
@@ -314,7 +319,7 @@ Optional fields are omitted from the line when they do not apply: `admission_ns`
 absent for `mrn_not_found`, `window` is absent for `missing_discharge_time`, and `availability`
 appears only for `below_availability_threshold`.
 
-Records go to a **child logger**, `atriumdb.dashboard.statistics_resolver.exclusions`, at WARNING
+Records go to a **child logger**, `atriumdb_dashboard.statistics_resolver.exclusions`, at WARNING
 level. Attaching a `FileHandler` to that logger routes them to a dedicated file without mixing
 them into general debug output; no file path is hardcoded.
 
@@ -322,7 +327,7 @@ them into general debug output; no file path is hardcoded.
 
 ## 8. Tests
 
-### 8.1 `tests/test_dashboard_api.py` — endpoint tests against a mocked SDK
+### 8.1 `tests/atriumdb_dashboard/test_dashboard_statistics_api.py` — endpoint tests against a mocked SDK
 
 Every test drives the real HTTP endpoint; only the SDK underneath is mocked, so schema
 serialisation, header handling and status codes are all exercised for real.
@@ -345,9 +350,9 @@ Coverage by group:
 | `all_time` | open stay excluded; discharge not after admission excluded; mixed admissions where one is scored and one dropped |
 | Contract | missing `X-Request-ID` → 400; unknown measure → 422 |
 
-### 8.2 `tests/test_dashboard_statistics_real_data.py` — real dataset
+### 8.2 `tests/atriumdb_dashboard/test_dashboard_statistics_real_data.py` — real dataset
 
-Runs the pipeline end-to-end through `sdk.dashboard_compute_statistics` against a mounted
+Runs the pipeline end-to-end through `compute_aggregate_statistics` against a mounted
 AtriumDB dataset, skipped automatically when `ATRIUMDB_DATASET_LOCATION` is unset.
 
 Cohort membership, admission timestamps, the measure identifier, the window and the threshold are
@@ -366,11 +371,11 @@ docker build -t atriumdb-sdk .
 
 # Endpoint tests (no dataset needed)
 docker run --rm -it -v "$(pwd):/sdk" atriumdb-sdk \
-  python -m pytest tests/test_dashboard_api.py -v
+  python -m pytest tests/atriumdb_dashboard/test_dashboard_statistics_api.py -v
 
 # Real-dataset run
 ./docker-run-dataset.sh python -m pytest \
-  tests/test_dashboard_statistics_real_data.py -v -s
+  tests/atriumdb_dashboard/test_dashboard_statistics_real_data.py -v -s
 ```
 
 See `dockersetup.md` for the full Docker workflow.
@@ -385,6 +390,6 @@ signal proves prone to artefact spikes, median would be more robust and could be
 the request. The dashboard receives per-entry values rather than pre-aggregated statistics
 precisely so that this choice does not have to be final for anything computed downstream.
 
-**API mode.** `dashboard_compute_statistics` is direct-DB only. If the dashboard ever needs to
+**API mode.** `compute_aggregate_statistics` is direct-DB only. If the dashboard ever needs to
 call an AtriumDB server over HTTP rather than embedding the SDK, this method needs the same
 `metadata_connection_type == "api"` branch that `dashboard_resolve_cohort` has.

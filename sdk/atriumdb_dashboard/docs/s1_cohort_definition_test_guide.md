@@ -36,8 +36,8 @@ grouping; those paths are covered by `test_dashboard_api.py`.
 
 | File | Role |
 |---|---|
-| `tests/test_dashboard_real_data.py` | The test file. Contains three tests: discovery, MRN cohort (1A), and demographic cohort (1B). |
-| `tests/z_test_local_setup.py` | Pre-processing script. Seeds scrambled MRNs and synthetic encounter/bed/unit rows. Run once before the tests; safe to re-run. |
+| `tests/atriumdb_dashboard/test_dashboard_real_data.py` | The test file. Contains three tests: discovery, MRN cohort (1A), and demographic cohort (1B). |
+| `tests/atriumdb_dashboard/z_test_local_setup.py` | Pre-processing script. Seeds scrambled MRNs and synthetic encounter/bed/unit rows. Run once before the tests; safe to re-run. |
 | `docker-run-dataset.sh` | Helper script to launch the Docker container with the dataset mounted and `ATRIUMDB_DATASET_LOCATION` set. Edit `HOST_DATASET_PATH` at the top to point to your local dataset folder. |
 
 ---
@@ -77,7 +77,7 @@ build time. You do not need to rebuild the image after editing SDK or test code.
 Run the discovery test first to see what is actually in the database:
 
 ```bash
-./docker-run-dataset.sh python -m pytest tests/test_dashboard_real_data.py::test_inspect_real_dataset -v -s
+./docker-run-dataset.sh python -m pytest tests/atriumdb_dashboard/test_dashboard_real_data.py::test_inspect_real_dataset -v -s
 ```
 
 This prints a patient table (id, mrn, gender, dob) and an encounter table (enc_id, patient_id,
@@ -93,14 +93,14 @@ visit_number, unit_name, start_time_ns) directly to stdout, followed by the min/
 Run the setup script — either directly:
 
 ```bash
-./docker-run-dataset.sh python tests/z_test_local_setup.py
+./docker-run-dataset.sh python tests/atriumdb_dashboard/z_test_local_setup.py
 ```
 
 or from an interactive shell in the container:
 
 ```bash
 ./docker-run-dataset.sh bash
-python tests/z_test_local_setup.py
+python tests/atriumdb_dashboard/z_test_local_setup.py
 ```
 
 What it does:
@@ -128,20 +128,20 @@ test window.
 Run all real-data tests:
 
 ```bash
-./docker-run-dataset.sh python -m pytest tests/test_dashboard_real_data.py -v -s
+./docker-run-dataset.sh python -m pytest tests/atriumdb_dashboard/test_dashboard_real_data.py -v -s
 ```
 
 Or run them individually:
 
 ```bash
 # Discovery — prints patient + encounter summary
-./docker-run-dataset.sh python -m pytest tests/test_dashboard_real_data.py::test_inspect_real_dataset -v -s
+./docker-run-dataset.sh python -m pytest tests/atriumdb_dashboard/test_dashboard_real_data.py::test_inspect_real_dataset -v -s
 
 # 1A — MRN cohort
-./docker-run-dataset.sh python -m pytest tests/test_dashboard_real_data.py::test_mrn_cohort_real_data -v -s
+./docker-run-dataset.sh python -m pytest tests/atriumdb_dashboard/test_dashboard_real_data.py::test_mrn_cohort_real_data -v -s
 
 # 1B — demographic cohort (all filter combinations in one test)
-./docker-run-dataset.sh python -m pytest tests/test_dashboard_real_data.py::test_demographic_cohort_real_data -v -s
+./docker-run-dataset.sh python -m pytest tests/atriumdb_dashboard/test_dashboard_real_data.py::test_demographic_cohort_real_data -v -s
 ```
 
 ---
@@ -260,19 +260,19 @@ More ready-made peek queries are kept, commented out, at the bottom of `docker-r
 ### Passing run output (stdout with `-v -s`)
 
 ```
-PASSED tests/test_dashboard_real_data.py::test_inspect_real_dataset
+PASSED tests/atriumdb_dashboard/test_dashboard_real_data.py::test_inspect_real_dataset
   PATIENTS (178 total — showing first 30)
   ...
   ENCOUNTERS (172 total — showing first 20)
   ...
 
-PASSED tests/test_dashboard_real_data.py::test_mrn_cohort_real_data
+PASSED tests/atriumdb_dashboard/test_dashboard_real_data.py::test_mrn_cohort_real_data
   cohort_a (3 resolved):
     mrn=MRN3279EDCF  admissions=[Admission(admission_ns=1602609105000000000, discharge_ns=..., location='ICU')]
     mrn=MRN3E7DB077  admissions=[...]
     mrn=MRN824A6D3E  admissions=[...]
 
-PASSED tests/test_dashboard_real_data.py::test_demographic_cohort_real_data
+PASSED tests/atriumdb_dashboard/test_dashboard_real_data.py::test_demographic_cohort_real_data
   ============================================================
   no_filters (172 patients):
     mrn=MRN...  admissions=[...]

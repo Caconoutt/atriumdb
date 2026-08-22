@@ -58,8 +58,6 @@ from atriumdb.windowing.random_access_iterator import MappedIterator
 from atriumdb.windowing.verify_definition import verify_definition
 from atriumdb.windowing.definition_splitter import partition_dataset
 from atriumdb.write_buffer import WriteBuffer
-from atriumdb.dashboard.schemas import AggregateStatisticsResponse
-from atriumdb.dashboard.statistics_resolver import compute_aggregate_statistics
 
 try:
     import requests
@@ -5385,52 +5383,6 @@ of DatasetIterator objects depending on the value of num_iterators.
             load_dotenv(dotenv_path="./.env", override=True)
 
         _LOGGER.debug("Expired token refreshed")
-
-    def dashboard_compute_statistics(self, request, request_id: str = "") -> AggregateStatisticsResponse:
-        """Compute per-cohort per-patient signal statistics over an observation window.
-
-        Takes a list of pre-resolved cohorts (from the cohort resolver) together
-        with a measure identifier and observation window, and returns the mean
-        signal value per patient for each cohort.
-
-        Processing pipeline per patient:
-
-        1. Resolve MRN → internal patient ID via :meth:`get_patient_id`.
-        2. Compute observation window: ``[admission_ns, admission_ns + observation_window]``.
-        3. Resolve patient + window → device ID via :meth:`convert_patient_to_device_id`.
-           Patients with no single device covering the full window are excluded.
-        4. Check data availability fraction via :meth:`get_interval_array`.
-           Patients below ``availability_threshold`` are excluded.
-        5. Fetch raw signal values via :meth:`get_data`, drop NaN, compute mean.
-           Patients with no valid values after NaN removal are excluded.
-
-        All log and exclusion records are prefixed with ``[request_id]``.
-        Exclusions are written to the
-        ``atriumdb.dashboard.statistics_resolver.exclusions`` logger. To capture
-        them in a file, attach a ``FileHandler`` to that logger before calling
-        this method.
-
-        :param request: An
-            :class:`~atriumdb.dashboard.schemas.AggregateStatisticsRequest`
-            containing the cohort list, measure identifier, observation window
-            (in nanoseconds), and availability threshold.
-        :param request_id: Correlation ID attached to all log and exclusion
-            records for this request. Must be a non-empty string.
-        :return: An
-            :class:`~atriumdb.dashboard.schemas.AggregateStatisticsResponse`
-            with one :class:`~atriumdb.dashboard.schemas.CohortStatistics` per
-            input cohort, each containing per-patient means and candidate /
-            included / excluded counts.
-        :raises ValueError: If ``request_id`` is missing or empty, or if the
-            requested measure does not exist in the dataset.
-        """
-        if not request_id:
-            _LOGGER.error(
-                "dashboard_compute_statistics called with missing or empty "
-                "request_id — every request must supply a non-empty request_id."
-            )
-            raise ValueError("request_id must be a non-empty string.")
-        return compute_aggregate_statistics(self, request, request_id)
 
     def close(self):
         """

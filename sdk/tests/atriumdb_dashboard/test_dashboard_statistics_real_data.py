@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from atriumdb import AtriumSDK
-from atriumdb.dashboard.schemas import (
+from atriumdb_dashboard.schemas import (
     Admission,
     AggregateStatisticsRequest,
     CohortInput,
@@ -130,7 +130,7 @@ def test_cohort_statistics_real_data(sdk):
         availability_threshold=STATS_AVAILABILITY_THRESHOLD,
     )
 
-    result = sdk.dashboard_compute_statistics(request, request_id="real-s2")
+    result = compute_aggregate_statistics(sdk, request, request_id="real-s2")
 
     STATS_LOG_PATH.write_text(json.dumps(result.model_dump(by_alias=True), indent=2))
     print(f"\nFull result written to: {STATS_LOG_PATH}")

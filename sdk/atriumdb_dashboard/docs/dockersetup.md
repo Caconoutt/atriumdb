@@ -46,6 +46,7 @@ or the `Dockerfile` itself changes.
 
 ```bash
 docker rmi atriumdb-sdk
+# or use: docker image prune
 docker build -t atriumdb-sdk .
 ```
 
@@ -77,11 +78,11 @@ This drops you into an interactive shell inside the container with:
 To run a specific test file instead of opening a shell, pass the pytest command as an argument:
 
 ```bash
-./docker-run-dataset.sh python -m pytest tests/test_dashboard_real_data.py -v -s
+./docker-run-dataset.sh python -m pytest tests/atriumdb_dashboard/test_dashboard_real_data.py -v -s
 ```
 To run a specific function in the file.
 ```base
-./docker-run-dataset.sh python -m pytest tests/test_dashboard_real_data.py::test_inspect_real_dataset -v -s
+./docker-run-dataset.sh python -m pytest tests/atriumdb_dashboard/test_dashboard_real_data.py::test_inspect_real_dataset -v -s
 ```
 
 The `"$@"` in the script forwards any arguments you append before `atriumdb-sdk bash`.
@@ -96,12 +97,12 @@ docker run --rm atriumdb-sdk
 
 - `--rm` automatically deletes the container when the test run finishes (keeps your
   system tidy; omit it if you want to inspect the container after a failure).
-- The default command in the `Dockerfile` runs `tests/test_dashboard_api.py`.
+- The default command in the `Dockerfile` runs `tests/atriumdb_dashboard/test_dashboard_statistics_api.py`.
 
 Expected output (all assertions pass):
 
 ```
-tests/test_dashboard_api.py::test_api_cohorts
+tests/atriumdb_dashboard/test_dashboard_statistics_api.py::test_api_cohorts
 Testing 1A: MRN cohort endpoint...
 Testing 1B: demographic cohort — location filter...
 Testing 1B: demographic cohort — sex filter...
@@ -120,10 +121,10 @@ Override the default command by appending your own `pytest` invocation:
 
 ```bash
 # Run only the dashboard test file
-docker run --rm atriumdb-sdk python -m pytest tests/test_dashboard_api.py -v -s
+docker run --rm atriumdb-sdk python -m pytest tests/atriumdb_dashboard/test_dashboard_statistics_api.py -v -s
 
 # Run a single test function
-docker run --rm atriumdb-sdk python -m pytest tests/test_dashboard_api.py::test_api_cohorts -v -s
+docker run --rm atriumdb-sdk python -m pytest tests/atriumdb_dashboard/test_dashboard_statistics_api.py::test_api_cohorts -v -s
 
 # Run the entire test suite
 docker run --rm atriumdb-sdk python -m pytest tests/ -v
@@ -143,7 +144,7 @@ Once inside you can, for example:
 
 ```bash
 # Run pytest manually
-python -m pytest tests/test_dashboard_api.py -v -s
+python -m pytest tests/atriumdb_dashboard/test_dashboard_statistics_api.py -v -s
 
 # Start a Python interpreter with the SDK importable
 python3
@@ -169,7 +170,7 @@ docker run --rm -it \
 - `-v "$(pwd)":/sdk` replaces the container's `/sdk` directory with your local
   working copy.
 - Any file you edit on your Mac is instantly available inside the container.
-- Run `python -m pytest tests/test_dashboard_api.py -v -s` inside the shell to
+- Run `python -m pytest tests/atriumdb_dashboard/test_dashboard_statistics_api.py -v -s` inside the shell to
   re-run tests after each change.
 
 > Note: the image still needs to have been built at least once with `docker build`
@@ -199,5 +200,5 @@ docker build -t atriumdb-sdk .
 | Interactive shell | `docker run --rm -it atriumdb-sdk bash` |
 | Shell with live source | `docker run --rm -it -v "$(pwd)":/sdk atriumdb-sdk bash` |
 | Shell with real dataset | `./docker-run-dataset.sh` |
-| Run real-data tests | `./docker-run-dataset.sh python -m pytest tests/test_dashboard_real_data.py -v -s` |
+| Run real-data tests | `./docker-run-dataset.sh python -m pytest tests/atriumdb_dashboard/test_dashboard_real_data.py -v -s` |
 | Remove image | `docker rmi atriumdb-sdk` |
