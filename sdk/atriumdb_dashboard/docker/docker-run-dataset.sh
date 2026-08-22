@@ -49,11 +49,17 @@ echo ""
 exec docker run --rm -it \
     -v "$HOST_DATASET_PATH:$CONTAINER_DATASET" \
     -v "$(pwd):/sdk" \
+    -v /sdk/bin \
     -e "ATRIUMDB_DATASET_LOCATION=$CONTAINER_DATASET" \
     "$IMAGE" \
     "${CMD[@]}"
 
+# An anonymous volume keeps /sdk/bin as the image built it. The bind mount above
+# replaces the whole /sdk tree with the host's copy, which does not carry the
+# artifacts produced by `pip install -e`.
+
 # # Commands on direct peeking meta tables (after enter imgae)
+
 # python -c "
 # import sqlite3
 # conn = sqlite3.connect('/data/atriumdb/meta/index.db')

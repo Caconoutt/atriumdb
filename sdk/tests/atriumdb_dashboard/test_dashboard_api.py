@@ -26,12 +26,9 @@ from pydantic import ValidationError
 
 from atriumdb.atrium_sdk import AtriumSDK
 from atriumdb_dashboard.api.app import mount_dashboard
-# Each router ships its own SDK provider, and both are named get_sdk_instance.
-# They must be aliased apart: dependency_overrides is keyed by the function
-# object, so importing both unaliased would leave one name bound to the other
-# module's provider and silently override the wrong router.
-from atriumdb_dashboard.api.cohort_endpoints import get_sdk_instance as get_cohort_sdk
-from atriumdb_dashboard.api.measures_endpoints import get_sdk_instance as get_measures_sdk
+# One provider shared by every dashboard router, so a single override covers
+# all of them.
+from atriumdb_dashboard.api.dependencies import get_sdk_instance
 from atriumdb_dashboard.cohort_resolver import resolve_cohort
 from atriumdb_dashboard.locations import UnknownLocationError
 from atriumdb_dashboard.queries import (
@@ -117,7 +114,7 @@ def _test_api_cohorts(db_type, dataset_location, connection_params):
     sdk = AtriumSDK.create_dataset(
         dataset_location=dataset_location, database_type=db_type, connection_params=connection_params)
 
-    app.dependency_overrides[get_cohort_sdk] = lambda: sdk
+    app.dependency_overrides[get_sdk_instance] = lambda: sdk
 
     api_sdk = AtriumSDK(metadata_connection_type="api", api_url=BASE_URL, validate_token=False)
     api_sdk.token_expiry = time.time() + 1_000_000
@@ -501,7 +498,7 @@ def _test_api_measure_total_hours(db_type, dataset_location, connection_params):
     sdk = AtriumSDK.create_dataset(
         dataset_location=dataset_location, database_type=db_type, connection_params=connection_params)
 
-    app.dependency_overrides[get_measures_sdk] = lambda: sdk
+    app.dependency_overrides[get_sdk_instance] = lambda: sdk
 
     # --- create measures and devices ---
     hr_id = sdk.insert_measure(measure_tag="HR", freq=1, freq_units="Hz", units="BPM")
