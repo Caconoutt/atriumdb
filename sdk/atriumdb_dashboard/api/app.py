@@ -84,10 +84,9 @@ def mount_dashboard(
     ``POST /cohorts/statistics`` computes statistics over already-resolved
     cohorts — so their order relative to each other does not matter.
 
-    Each router keeps its own SDK dependency, so a caller overriding one does
-    not affect the others. All three providers are named ``get_sdk_instance``;
-    import them aliased apart, since ``dependency_overrides`` is keyed by the
-    function object and the unaliased names collide.
+    All routers share one SDK provider,
+    :func:`~atriumdb_dashboard.api.dependencies.get_sdk_instance`, so a single
+    ``app.dependency_overrides`` entry covers every dashboard route.
 
     :param app: The FastAPI application to mount onto.
     :param cohort_prefix: URL prefix shared by the cohorts and statistics

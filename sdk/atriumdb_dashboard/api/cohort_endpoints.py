@@ -17,31 +17,25 @@
 
 """FastAPI router exposing ``POST /cohorts``.
 
-The router owns its own SDK dependency (:func:`get_sdk_instance`) rather than
-borrowing one from the test package, so the dashboard is self-contained and
-mountable on any FastAPI app. Callers wire it up with
-:func:`~atriumdb_dashboard.api.app.mount_dashboard`, and tests swap the SDK by
-overriding :func:`get_sdk_instance` in ``app.dependency_overrides``.
+Takes its SDK from :mod:`atriumdb_dashboard.api.dependencies`, shared with every
+other dashboard router, so the package stays self-contained (nothing is borrowed
+from the test package) and a single ``app.dependency_overrides`` entry swaps the
+SDK for all routers at once.
+
+Callers wire the router up with
+:func:`~atriumdb_dashboard.api.app.mount_dashboard`.
 """
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
 from atriumdb import AtriumSDK
+from atriumdb_dashboard.api.dependencies import get_sdk_instance
 from atriumdb_dashboard.cohort_resolver import resolve_cohort
 from atriumdb_dashboard.locations import UnknownLocationError
 from atriumdb_dashboard.schemas import CohortDefinitionRequest, MrnCohortResponse
 
 router = APIRouter()
 
-
-def get_sdk_instance() -> AtriumSDK:
-    """Provide the direct-DB SDK instance the endpoint resolves against.
-
-    The default constructs an SDK from the ambient environment. Deployments
-    and tests are expected to replace it via
-    ``app.dependency_overrides[get_sdk_instance]``.
-    """
-    return AtriumSDK()
 
 
 @router.post("", response_model=MrnCohortResponse)

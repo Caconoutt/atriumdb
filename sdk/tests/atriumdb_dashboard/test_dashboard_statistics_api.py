@@ -20,7 +20,7 @@ import requests
 import uvicorn
 
 from atriumdb_dashboard.api.app import mount_dashboard
-from atriumdb_dashboard.api.statistics_endpoints import get_sdk_instance as get_statistics_sdk
+from atriumdb_dashboard.api.dependencies import get_sdk_instance
 from tests.mock_api.app import app
 
 # Mount the dashboard onto the upstream AtriumDB test app at runtime, rather
@@ -175,7 +175,7 @@ def _body(mrns_and_admissions: list[tuple[str, list]],
 
 
 def _post_stats(sdk, body: dict, headers: dict = HEADERS) -> requests.Response:
-    app.dependency_overrides[get_statistics_sdk] = lambda: sdk
+    app.dependency_overrides[get_sdk_instance] = lambda: sdk
     return requests.post(f"{BASE_URL}/cohorts/statistics", json=body,
                          headers=headers, timeout=10)
 

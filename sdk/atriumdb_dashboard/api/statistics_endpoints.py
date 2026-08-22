@@ -17,14 +17,16 @@
 
 """FastAPI router exposing the dashboard's cohort-statistics endpoint.
 
-The router owns its own SDK dependency (:func:`get_sdk_instance`) rather than
-borrowing one from the test package, so the dashboard is self-contained and
-mountable on any FastAPI app.
+Takes its SDK from :mod:`atriumdb_dashboard.api.dependencies`, shared with every
+other dashboard router, so the package stays self-contained (nothing is borrowed
+from the test package) and a single ``app.dependency_overrides`` entry swaps the
+SDK for all routers at once.
 """
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
 from atriumdb import AtriumSDK
+from atriumdb_dashboard.api.dependencies import get_sdk_instance
 from atriumdb_dashboard.schemas import (
     AggregateStatisticsRequest,
     AggregateStatisticsResponse,
@@ -33,15 +35,6 @@ from atriumdb_dashboard.statistics_resolver import compute_aggregate_statistics
 
 router = APIRouter()
 
-
-def get_sdk_instance() -> AtriumSDK:
-    """Provide the direct-DB SDK instance the endpoint computes against.
-
-    The default constructs an SDK from the ambient environment. Deployments and
-    tests are expected to replace it via
-    ``app.dependency_overrides[get_sdk_instance]``.
-    """
-    return AtriumSDK()
 
 
 @router.post("/statistics", response_model=AggregateStatisticsResponse)

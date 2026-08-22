@@ -17,27 +17,20 @@
 
 """FastAPI router exposing the dashboard's measure-statistics endpoints.
 
-The router owns its own SDK dependency (:func:`get_sdk_instance`) rather than
-borrowing one from the test package, so the dashboard is self-contained and
-mountable on any FastAPI app.
+Takes its SDK from :mod:`atriumdb_dashboard.api.dependencies`, shared with every
+other dashboard router, so the package stays self-contained (nothing is borrowed
+from the test package) and a single ``app.dependency_overrides`` entry swaps the
+SDK for all routers at once.
 """
 
 from fastapi import APIRouter, Depends
 
 from atriumdb import AtriumSDK
+from atriumdb_dashboard.api.dependencies import get_sdk_instance
 from atriumdb_dashboard.queries import query_measure_total_hours
 
 router = APIRouter()
 
-
-def get_sdk_instance() -> AtriumSDK:
-    """Provide the direct-DB SDK instance the endpoints query against.
-
-    The default constructs an SDK from the ambient environment. Deployments and
-    tests are expected to replace it via
-    ``app.dependency_overrides[get_sdk_instance]``.
-    """
-    return AtriumSDK()
 
 
 @router.get("/hours")
