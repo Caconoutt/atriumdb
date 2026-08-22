@@ -144,20 +144,30 @@ boundary (422 over HTTP).
 
 ---
 
-## 3. SQL Handler Layer
+## 3. SQL Layer
 
-### 3.1 `select_patient_encounters` (new abstract method)
+### 3.1 `select_patient_encounters`
 
-Added to `SQLHandler` immediately after `select_encounters` so both encounter-related methods
-are grouped together. Implemented by both `SQLiteHandler` and `MariaDBHandler`.
+Lives in `atriumdb_dashboard/queries.py`, **not** on `SQLHandler`. It takes the SDK as its first
+argument and obtains a cursor from the upstream backend-agnostic accessor:
 
 ```
-sql_handler.py       → @abstractmethod select_patient_encounters(patient_id_list, admit_start_ns, admit_end_ns, unit_name_list)
-sqlite_handler.py    → implementation using self.sqlite_db_connection()
-maria_handler.py     → implementation using self.maria_db_connection()
+queries.py → select_patient_encounters(sdk, patient_id_list, admit_start_ns, admit_end_ns, unit_name_list)
+                └─ sdk.sql_handler.connection(begin=False)
 ```
 
-Both implementations follow the existing SDK style exactly:
+`connection(begin)` is declared `@abstractmethod` on `SQLHandler`, and `SQLiteHandler` and
+`MariaDBHandler` each implement it by delegating to their own manager — so one function covers
+both backends and `atriumdb` needs no change.
+
+This was originally an abstract method on `SQLHandler` with an implementation in each handler.
+That shape had two costs: adding an `@abstractmethod` to the ABC is a breaking change for any
+out-of-tree handler subclass, and it puts dashboard code in files that conflict on every upstream
+merge. The two implementations were also byte-identical apart from the connection call, so
+collapsing them lost nothing — the SQL is ANSI-only and both backends take `?` placeholders, so a
+single statement serves each.
+
+The query follows the existing SDK style exactly:
 - `arg_tuple = ()`, `where_clauses = []`
 - `','.join(['?'] * len(...))` for IN placeholders
 - `WHERE ... AND ...` appended only when `where_clauses` is non-empty
@@ -381,7 +391,15 @@ which request a payload belongs to.
 
 ### 6.1 `atriumdb_dashboard/api/cohort_endpoints.py`
 
-Follows the same pattern as `measures_endpoints.py`, `patient_endpoints.py`, etc.
+Follows the same shape as the upstream endpoint modules (`measures_endpoints.py`,
+`patient_endpoints.py`), but lives in the dashboard package and carries its own
+`get_sdk_instance` dependency rather than importing one from `tests/`. It is attached to the host
+application at runtime by `mount_dashboard(app)` at the `/cohorts` prefix, so
+`tests/mock_api/app.py` stays byte-identical to upstream.
+
+Both routers define a provider named `get_sdk_instance`, so a caller importing both must alias
+them apart — `dependency_overrides` is keyed by the function object, and the unaliased names
+collide silently.
 
 ```python
 @router.post("", response_model=MrnCohortResponse)
@@ -437,7 +455,7 @@ Omitting `X-Request-ID` returns 422.
 Dashboard tests live in their own files, separate from `test_api.py`, to avoid importing
 `test_mit_bih` (which pulls in `wfdb`) just to test cohort endpoints.
 
-### 7.1 `tests/atriumdb_dashboard/test_dashboard_statistics_api.py` — synthetic fixtures
+### 7.1 `tests/atriumdb_dashboard/test_dashboard_api.py` — synthetic fixtures
 
 Creates a SQLite dataset under `tests/test_datasets/`, starts the mock FastAPI app on port
 8123, and inserts an institution, one ICU unit, one bed, and three patients: two with
@@ -466,7 +484,7 @@ normal test run. See `s1_cohort_definition_test_guide.md`.
 
 ```bash
 cd /path/to/atriumdb/sdk
-PYTHONPATH=. python3 -m pytest tests/atriumdb_dashboard/test_dashboard_statistics_api.py::test_api_cohorts -v -s
+PYTHONPATH=. python3 -m pytest tests/atriumdb_dashboard/test_dashboard_api.py::test_api_cohorts -v -s
 ```
 
 `AtriumSDK.__init__` raises `OSError("AtriumSDK is not currently supported on macOS.")` at

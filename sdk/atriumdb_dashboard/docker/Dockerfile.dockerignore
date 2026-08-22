@@ -5,3 +5,4 @@ __pycache__/
 .pytest_cache/
 tests/test_datasets/
 tests/atriumdb_dashboard/test_datasets/
+tests/atriumdb_dashboard/measure_hours_report.log

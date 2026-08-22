@@ -25,24 +25,33 @@ deployment — without either side importing the other.
 from __future__ import annotations
 
 from atriumdb_dashboard.api.cohort_endpoints import router as cohort_router
+from atriumdb_dashboard.api.measures_endpoints import router as measures_router
 from atriumdb_dashboard.api.statistics_endpoints import router as statistics_router
 
-DASHBOARD_PREFIX = "/cohorts"
+COHORT_PREFIX = "/cohorts"
+MEASURES_PREFIX = "/measures"
 
 
 def _mount_router(app, router, prefix: str):
     """Include ``router`` at ``prefix`` and move its routes to the front.
 
     Starlette matches routes in registration order and takes the first full
-    match, with no preference for a more specific path, while
-    ``include_router`` can only append. Registering the dashboard first means a
-    host route that happens to match a dashboard path — a wildcard such as
-    ``/{cohort_id}``, say — cannot capture it.
+    match, with no preference for a more specific path. ``include_router`` can
+    only append, so a dashboard route added to an app that already has a
+    matching wildcard would never be reached.
 
-    Nothing upstream currently serves ``/cohorts``, so this is defensive rather
-    than load-bearing here. Every dashboard path is a literal, so only the
-    routes added by this call move ahead and nothing already registered can be
-    shadowed.
+    That is not hypothetical: the host registers ``GET /measures/{measure_id}``,
+    whose pattern also matches ``/measures/hours``. Appended normally, a request
+    for the dashboard endpoint resolves to ``get_measure_info(measure_id="hours")``
+    instead. Registering first is what the original in-place edit achieved by
+    declaring ``/hours`` above ``/{measure_id}`` in the same module.
+
+    The cohort routes have no such conflict — nothing upstream serves
+    ``/cohorts`` — but they are mounted the same way so that one rule covers
+    every router and a future host route cannot quietly capture them.
+
+    Only the routes added by this call move ahead, and every dashboard path is a
+    literal, so nothing already registered can be shadowed.
 
     :param app: The FastAPI application to mount onto.
     :param router: The ``APIRouter`` to include.
@@ -59,38 +68,54 @@ def _mount_router(app, router, prefix: str):
     return app
 
 
-def mount_dashboard(app, prefix: str = DASHBOARD_PREFIX):
+def mount_dashboard(
+    app,
+    cohort_prefix: str = COHORT_PREFIX,
+    measures_prefix: str = MEASURES_PREFIX,
+):
     """Attach every dashboard router to an existing FastAPI app.
 
     Additive by design: this is what replaces editing the host application's
-    ``app.py`` to add an ``include_router`` call, keeping the upstream AtriumDB
-    test app byte-identical to ``main``.
+    endpoint modules, keeping the upstream AtriumDB test app byte-identical to
+    ``main``.
 
-    Both routers share the ``/cohorts`` prefix and serve distinct literal paths
-    — ``POST /cohorts`` resolves a cohort definition, ``POST /cohorts/statistics``
-    computes statistics over already-resolved cohorts — so their order relative
-    to each other does not matter.
+    The cohorts and statistics routers share the ``/cohorts`` prefix and serve
+    distinct literal paths — ``POST /cohorts`` resolves a cohort definition,
+    ``POST /cohorts/statistics`` computes statistics over already-resolved
+    cohorts — so their order relative to each other does not matter.
 
     Each router keeps its own SDK dependency, so a caller overriding one does
-    not affect the other. Both providers are named ``get_sdk_instance``; import
-    them aliased apart, since ``dependency_overrides`` is keyed by the function
-    object and the unaliased names collide.
+    not affect the others. All three providers are named ``get_sdk_instance``;
+    import them aliased apart, since ``dependency_overrides`` is keyed by the
+    function object and the unaliased names collide.
 
     :param app: The FastAPI application to mount onto.
-    :param prefix: URL prefix shared by the dashboard routers.
+    :param cohort_prefix: URL prefix shared by the cohorts and statistics
+        routers, serving ``POST /cohorts`` and ``POST /cohorts/statistics``.
+    :param measures_prefix: URL prefix for the measures router, serving
+        ``GET /measures/hours``.
     :return: The same ``app``, to allow chaining.
     """
-    _mount_router(app, cohort_router, prefix)
-    _mount_router(app, statistics_router, prefix)
+    _mount_router(app, cohort_router, cohort_prefix)
+    _mount_router(app, statistics_router, cohort_prefix)
+    _mount_router(app, measures_router, measures_prefix)
     return app
 
 
-def create_dashboard_app(prefix: str = DASHBOARD_PREFIX):
+def create_dashboard_app(
+    cohort_prefix: str = COHORT_PREFIX,
+    measures_prefix: str = MEASURES_PREFIX,
+):
     """Build a standalone FastAPI app serving only the dashboard routes.
 
-    :param prefix: URL prefix shared by the dashboard routers.
+    :param cohort_prefix: URL prefix for the cohorts router.
+    :param measures_prefix: URL prefix for the measures router.
     :return: A new ``FastAPI`` instance with the dashboard mounted.
     """
     from fastapi import FastAPI
 
-    return mount_dashboard(FastAPI(), prefix=prefix)
+    return mount_dashboard(
+        FastAPI(),
+        cohort_prefix=cohort_prefix,
+        measures_prefix=measures_prefix,
+    )

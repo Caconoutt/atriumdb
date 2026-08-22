@@ -17,14 +17,15 @@
 
 """HTTP surface for the dashboard: the routers and their app wiring.
 
-Both routers define a provider named ``get_sdk_instance``, so they are
-re-exported aliased. Importing them unaliased would bind one name to the other
+All three routers define a provider named ``get_sdk_instance``, so they are
+re-exported aliased. Importing them unaliased would bind one name to another
 module's provider, and ``dependency_overrides`` — which is keyed by the function
 object — would then silently override the wrong router.
 """
 
 from atriumdb_dashboard.api.app import (
-    DASHBOARD_PREFIX,
+    COHORT_PREFIX,
+    MEASURES_PREFIX,
     create_dashboard_app,
     mount_dashboard,
 )
@@ -32,17 +33,24 @@ from atriumdb_dashboard.api.cohort_endpoints import (
     get_sdk_instance as get_cohort_sdk,
     router as cohort_router,
 )
+from atriumdb_dashboard.api.measures_endpoints import (
+    get_sdk_instance as get_measures_sdk,
+    router as measures_router,
+)
 from atriumdb_dashboard.api.statistics_endpoints import (
     get_sdk_instance as get_statistics_sdk,
     router as statistics_router,
 )
 
 __all__ = [
-    "DASHBOARD_PREFIX",
+    "COHORT_PREFIX",
+    "MEASURES_PREFIX",
     "cohort_router",
     "create_dashboard_app",
     "get_cohort_sdk",
+    "get_measures_sdk",
     "get_statistics_sdk",
+    "measures_router",
     "mount_dashboard",
     "statistics_router",
 ]

@@ -1,4 +1,4 @@
-"""Real-dataset tests for dashboard cohort resolution.
+"""Real-dataset tests for dashboard cohort resolution and measure statistics.
 
 These tests require a real AtriumDB dataset to be mounted into the container.
 They are skipped automatically when ATRIUMDB_DATASET_LOCATION is not set, so
@@ -9,7 +9,7 @@ To run them:
     docker run --rm -it \\
       -v "/host/path/to/dataset":/data/atriumdb \\
       --env-file .env \\
-      atriumdb-sdk python -m pytest tests/test_dashboard_real_data.py -v -s
+      atriumdb-sdk python -m pytest tests/atriumdb_dashboard/test_dashboard_real_data.py -v -s
 
 Workflow
 --------
@@ -19,15 +19,22 @@ Workflow
    and adjust the admission date range to match your data.
 3. Run ``test_demographic_cohort_real_data`` to verify demographic filtering
    works end-to-end against the real schema.
+4. Run ``test_measure_hours_report`` to write a per-measure coverage report;
+   it needs no configuration and works on any mounted dataset.
 """
 
+import datetime
+import json
 import os
 
 import pytest
 
 from atriumdb import AtriumSDK
 from atriumdb_dashboard.cohort_resolver import resolve_cohort
-from atriumdb_dashboard.queries import select_patient_encounters
+from atriumdb_dashboard.queries import (
+    query_measure_total_hours,
+    select_patient_encounters,
+)
 from atriumdb_dashboard.schemas import (
     Admission,
     AdmissionDateRange,
@@ -339,3 +346,73 @@ def test_demographic_cohort_real_data(sdk):
             assert resolved == expected_admissions, (
                 f"Cohort '{cohort_id}': expected admissions {expected_admissions}, got {resolved}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Step 4 - measure coverage report (needs no configuration)
+# ---------------------------------------------------------------------------
+_DEFAULT_LOG_PATH = os.path.join(
+    os.path.dirname(__file__), "measure_hours_report.log"
+)
+LOG_PATH = os.environ.get("ATRIUMDB_MEASURE_HOURS_LOG", _DEFAULT_LOG_PATH)
+
+
+def _fmt_hours(h: float) -> str:
+    total_minutes = int(h * 60)
+    hh, mm = divmod(total_minutes, 60)
+    return f"{hh:,} h {mm:02d} m"
+
+
+def test_measure_hours_report(sdk):
+    """Write a per-measure coverage report from block_index to LOG_PATH.
+
+    Counts stored samples from ``block_index`` and converts to hours using
+    each measure's ``freq_nhz``. Asserts all totals are non-negative. Read
+    the log file after the run for a human-friendly table.
+    """
+    rows = query_measure_total_hours(sdk)
+
+    if not rows:
+        pytest.skip("block_index is empty — dataset has no ingested blocks.")
+
+    for row in rows:
+        assert row["total_hours"] >= 0, (
+            f"Negative total_hours for measure {row['measure_id']}"
+        )
+
+    timestamp = datetime.datetime.now().isoformat(timespec="seconds")
+    lines = [
+        "=" * 66,
+        f"  AtriumDB Measure Coverage Report  —  {timestamp}",
+        f"  Dataset : {DATASET_LOCATION}",
+        f"  Source  : block_index  ({len(rows)} measures)",
+        "=" * 66,
+        "",
+        f"  {'ID':>6}  {'tag':<30}  {'units':<12}  {'total_hours':>14}",
+        "-" * 66,
+    ]
+    for r in rows:
+        lines.append(
+            f"  {r['measure_id']:>6}  {str(r['measure_tag'] or ''):<30}"
+            f"  {str(r['units'] or ''):<12}  {_fmt_hours(r['total_hours']):>14}"
+        )
+    grand = sum(r["total_hours"] for r in rows)
+    lines += [
+        "-" * 66,
+        f"  {'':>6}  {'TOTAL':<30}  {'':>12}  {_fmt_hours(grand):>14}",
+        "",
+        "=" * 66,
+        "",
+    ]
+    report = "\n".join(lines)
+
+    raw_json = json.dumps(rows, indent=2)
+
+    with open(LOG_PATH, "w", encoding="utf-8") as fh:
+        fh.write(report)
+        fh.write("\n\n--- RAW JSON ---\n\n")
+        fh.write(raw_json)
+        fh.write("\n")
+
+    print(f"\nMeasure coverage report written to: {LOG_PATH}")
+    print(report)

@@ -36,9 +36,9 @@ grouping; those paths are covered by `test_dashboard_api.py`.
 
 | File | Role |
 |---|---|
-| `tests/atriumdb_dashboard/test_dashboard_real_data.py` | The test file. Contains three tests: discovery, MRN cohort (1A), and demographic cohort (1B). |
+| `tests/atriumdb_dashboard/test_dashboard_real_data.py` | The test file. Contains four tests: discovery, MRN cohort (1A), demographic cohort (1B), and the measure-coverage report (S1.5), which needs no configuration. |
 | `tests/atriumdb_dashboard/z_test_local_setup.py` | Pre-processing script. Seeds scrambled MRNs and synthetic encounter/bed/unit rows. Run once before the tests; safe to re-run. |
-| `docker-run-dataset.sh` | Helper script to launch the Docker container with the dataset mounted and `ATRIUMDB_DATASET_LOCATION` set. Edit `HOST_DATASET_PATH` at the top to point to your local dataset folder. |
+| `atriumdb_dashboard/docker/docker-run-dataset.sh` | Helper script to launch the Docker container with the dataset mounted and `ATRIUMDB_DATASET_LOCATION` set. Edit `HOST_DATASET_PATH` at the top to point to your local dataset folder. |
 
 ---
 
@@ -46,7 +46,7 @@ grouping; those paths are covered by `test_dashboard_api.py`.
 
 1. Build the Docker image from the `sdk/` directory if you have not already:
    ```bash
-   docker build -t atriumdb-sdk .
+   docker build -t atriumdb-sdk -f atriumdb_dashboard/docker/Dockerfile .
    ```
 
 2. Open `docker-run-dataset.sh` and set `HOST_DATASET_PATH` to the absolute path of your dataset
@@ -77,7 +77,7 @@ build time. You do not need to rebuild the image after editing SDK or test code.
 Run the discovery test first to see what is actually in the database:
 
 ```bash
-./docker-run-dataset.sh python -m pytest tests/atriumdb_dashboard/test_dashboard_real_data.py::test_inspect_real_dataset -v -s
+./atriumdb_dashboard/docker/docker-run-dataset.sh python -m pytest tests/atriumdb_dashboard/test_dashboard_real_data.py::test_inspect_real_dataset -v -s
 ```
 
 This prints a patient table (id, mrn, gender, dob) and an encounter table (enc_id, patient_id,
@@ -93,13 +93,13 @@ visit_number, unit_name, start_time_ns) directly to stdout, followed by the min/
 Run the setup script — either directly:
 
 ```bash
-./docker-run-dataset.sh python tests/atriumdb_dashboard/z_test_local_setup.py
+./atriumdb_dashboard/docker/docker-run-dataset.sh python tests/atriumdb_dashboard/z_test_local_setup.py
 ```
 
 or from an interactive shell in the container:
 
 ```bash
-./docker-run-dataset.sh bash
+./atriumdb_dashboard/docker/docker-run-dataset.sh bash
 python tests/atriumdb_dashboard/z_test_local_setup.py
 ```
 
@@ -128,20 +128,20 @@ test window.
 Run all real-data tests:
 
 ```bash
-./docker-run-dataset.sh python -m pytest tests/atriumdb_dashboard/test_dashboard_real_data.py -v -s
+./atriumdb_dashboard/docker/docker-run-dataset.sh python -m pytest tests/atriumdb_dashboard/test_dashboard_real_data.py -v -s
 ```
 
 Or run them individually:
 
 ```bash
 # Discovery — prints patient + encounter summary
-./docker-run-dataset.sh python -m pytest tests/atriumdb_dashboard/test_dashboard_real_data.py::test_inspect_real_dataset -v -s
+./atriumdb_dashboard/docker/docker-run-dataset.sh python -m pytest tests/atriumdb_dashboard/test_dashboard_real_data.py::test_inspect_real_dataset -v -s
 
 # 1A — MRN cohort
-./docker-run-dataset.sh python -m pytest tests/atriumdb_dashboard/test_dashboard_real_data.py::test_mrn_cohort_real_data -v -s
+./atriumdb_dashboard/docker/docker-run-dataset.sh python -m pytest tests/atriumdb_dashboard/test_dashboard_real_data.py::test_mrn_cohort_real_data -v -s
 
 # 1B — demographic cohort (all filter combinations in one test)
-./docker-run-dataset.sh python -m pytest tests/atriumdb_dashboard/test_dashboard_real_data.py::test_demographic_cohort_real_data -v -s
+./atriumdb_dashboard/docker/docker-run-dataset.sh python -m pytest tests/atriumdb_dashboard/test_dashboard_real_data.py::test_demographic_cohort_real_data -v -s
 ```
 
 ---
