@@ -6,3 +6,14 @@ __pycache__/
 tests/test_datasets/
 tests/atriumdb_dashboard/test_datasets/
 tests/atriumdb_dashboard/measure_hours_report.log
+
+# Host virtualenv — macOS binaries, useless and ~15MB inside a Linux image.
+.venv/
+# Local dev config; the container gets its environment from compose.
+.env
+.DS_Store
+docs/
+
+# NOTE: tests/ is deliberately NOT excluded. The served app composes the
+# upstream tests/mock_api application, so those modules must ship in the image.
+# bin/ must also stay — it holds the Linux libTSC.so the SDK loads at runtime.

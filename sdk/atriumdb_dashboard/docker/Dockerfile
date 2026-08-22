@@ -2,11 +2,15 @@ FROM python:3.11-slim
 
 WORKDIR /sdk
 
-# System libraries required by the mariadb Python C extension (pulled in by [testing]).
-# gcc is needed to compile the extension; libmariadb-dev provides the MariaDB client headers.
+# gcc and libmariadb-dev build the mariadb Python C extension.
+# libgomp1, liblz4-1 and libzstd1 are loaded at runtime by the SDK's own
+# libTSC.so; without them the import succeeds and the first query fails.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc \
         libmariadb-dev \
+        libgomp1 \
+        liblz4-1 \
+        libzstd1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy project source into the image.
@@ -22,6 +26,15 @@ RUN pip install --no-cache-dir -e ".[testing]"
 # built, and shipped independently of the SDK.
 RUN pip install --no-cache-dir -e "./atriumdb_dashboard[testing]"
 
-# Default command: run the dashboard cohort tests.
-# Override this on the docker run command line to run a different test file or get a shell.
-CMD ["python", "-m", "pytest", "tests/atriumdb_dashboard/test_dashboard_api.py", "-v", "-s"]
+EXPOSE 8000
+
+# Default command: serve the API the dashboard calls.
+# The dataset directory must be mounted and ATRIUMDB_DATASET_LOCATION set to it.
+#
+# atriumdb_dashboard.deploy.server composes the upstream tests/mock_api app with the
+# dashboard routers, so that file stays identical to upstream. WORKDIR is /sdk and
+# uvicorn puts the working directory on sys.path, so both packages resolve.
+#
+# Override on the command line to run tests instead, e.g.
+#   docker run --rm atriumdb-sdk python -m pytest tests/atriumdb_dashboard/ -v -s
+CMD ["uvicorn", "atriumdb_dashboard.deploy.server:app", "--host", "0.0.0.0", "--port", "8000"]
