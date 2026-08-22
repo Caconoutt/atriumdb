@@ -141,8 +141,8 @@ def compute_aggregate_statistics(sdk, request, request_id: str) -> AggregateStat
 ```
 
 It takes the SDK as its first argument rather than being a method on it. Nothing in the pipeline
-needs private SDK state — every call it makes (`get_patient_id`, `convert_patient_to_device_id`,
-`get_interval_array`, `get_data`, `get_measure_id`, `get_patient_info`) is public API that already
+needs private SDK state — every call it makes (`get_patient_id`, `get_interval_array`,
+`get_data`, `get_measure_id`, `get_patient_info`) is public API that already
 exists upstream — so `atrium_sdk.py` needs no modification and merges cleanly.
 
 `request_id` is a correlation token: every log line and every exclusion record emitted while
@@ -209,14 +209,18 @@ of every resolved patient.
 |---|---|---|
 | 3a | `sdk.get_patient_id(mrn=...)` for each patient | `mrn_not_found` (patient-level, no admission) |
 | 3b | Observation window for this admission (§5.3) | `missing_discharge_time` |
-| 3c | `sdk.convert_patient_to_device_id(start_time, end_time, patient_id)` | `no_device_found` |
-| 3d | Availability from `sdk.get_interval_array(measure_id, device_id, patient_id, start, end)` | `below_availability_threshold` |
-| 4 | Values from `sdk.get_data(...)`, NaN removal, optional bounds, mean | `no_usable_values` or `below_availability_threshold` |
+| 3c | Availability from `sdk.get_interval_array(measure_id, patient_id, start, end)` | `below_availability_threshold` |
+| 3d | Values from `sdk.get_data(...)`, NaN removal, optional bounds, mean | `no_usable_values` or `below_availability_threshold` |
 
-`convert_patient_to_device_id` returns an id only when **one device covers the whole window**; no
-device, or several devices with none spanning it, both yield `None` and the entry is dropped.
+Both `get_interval_array` and `get_data` accept a **patient id or a device id**, and the pipeline
+supplies the patient id alone. An earlier version resolved `patient_id` to a `device_id` via
+`convert_patient_to_device_id` and passed both; that step has been removed. It was not merely
+redundant — it narrowed results, because it returns an id only when a *single* device covers the
+whole window, so a stay spanning two devices was dropped as `no_device_found` even though the
+data existed. Querying by patient covers the whole stay regardless of how many devices recorded
+it.
 
-Availability at step 3d is coverage-based:
+Availability at step 3c is coverage-based:
 
 ```python
 covered_ns = int(np.sum(interval_arr[:, 1] - interval_arr[:, 0]))   # 0 when the array is empty
@@ -305,7 +309,7 @@ alone; when neither does, the signal is unbounded and step 5.4 takes the simple 
 
 ## 7. Exclusions
 
-`ExclusionReason` is a string enum with five values: `mrn_not_found`, `no_device_found`,
+`ExclusionReason` is a string enum with four values: `mrn_not_found`,
 `below_availability_threshold`, `no_usable_values`, `missing_discharge_time`.
 
 Every dropped entry is recorded twice — once as an `ExclusionRecord` in the response, and once as
@@ -337,7 +341,7 @@ serialisation, header handling and status codes are all exercised for real.
 - A second autouse fixture clears `app.dependency_overrides` after every test, so an SDK injected
   by one test cannot silently serve the next.
 - `_mock_sdk(...)` builds a stand-in with configurable `get_measure_id`, `get_patient_id`,
-  `convert_patient_to_device_id`, `get_interval_array`, `get_data` and `get_patient_info`, which
+  `get_interval_array`, `get_data` and `get_patient_info`, which
   lets each case target one pipeline stage without a dataset or the native library.
 
 Coverage by group:

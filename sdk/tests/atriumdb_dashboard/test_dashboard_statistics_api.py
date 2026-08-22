@@ -80,7 +80,6 @@ ONE_YEAR_NS = 365 * 24 * ONE_HOUR_NS
 MEASURE_ID = 1
 MEASURE_TAG = "SpO2"
 PATIENT_ID = 42
-DEVICE_ID = 7
 
 FULL_COVERAGE = np.array([[ADMIT_NS, ADMIT_NS + WINDOW_NS]])
 LOW_COVERAGE = np.array([[ADMIT_NS, ADMIT_NS + 10 * ONE_HOUR_NS]])  # 10/24 ≈ 41 %
@@ -105,7 +104,7 @@ _UNSET = object()
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _mock_sdk(measure_id=MEASURE_ID, patient_id=PATIENT_ID, device_id=DEVICE_ID,
+def _mock_sdk(measure_id=MEASURE_ID, patient_id=PATIENT_ID,
               interval_arr=None, values=None, patient_info=_UNSET) -> MagicMock:
     """An SDK whose per-stage lookups are stubbed but whose statistics entry
     point runs the real resolver, so the stubs below are genuinely exercised.
@@ -123,7 +122,6 @@ def _mock_sdk(measure_id=MEASURE_ID, patient_id=PATIENT_ID, device_id=DEVICE_ID,
     sdk = MagicMock()
     sdk.get_measure_id.return_value = measure_id
     sdk.get_patient_id.return_value = patient_id
-    sdk.convert_patient_to_device_id.return_value = device_id
     sdk.get_interval_array.return_value = FULL_COVERAGE if interval_arr is None else interval_arr
     sdk.get_patient_info.return_value = PATIENT_INFO if patient_info is _UNSET else patient_info
 
@@ -253,7 +251,8 @@ def test_statistics_multiple_admissions_are_scored_separately():
     admit_2 = ADMIT_NS + 30 * 24 * ONE_HOUR_NS
 
     sdk = _mock_sdk()
-    sdk.convert_patient_to_device_id.side_effect = [None, DEVICE_ID]
+    # First admission falls under the availability threshold, second does not.
+    sdk.get_interval_array.side_effect = [LOW_COVERAGE, FULL_COVERAGE]
     resp = _post_stats(sdk, _body([("MRN001", [ADMIT_NS, admit_2])]))
 
     cohort = _cohort_of(resp)
@@ -265,7 +264,8 @@ def test_statistics_multiple_admissions_are_scored_separately():
     assert cohort["patientResults"][0]["admissionNs"] == admit_2
 
     exc = cohort["exclusions"][0]
-    assert (exc["mrn"], exc["admissionNs"], exc["reason"]) == ("MRN001", ADMIT_NS, "no_device_found")
+    assert (exc["mrn"], exc["admissionNs"], exc["reason"]) == (
+        "MRN001", ADMIT_NS, "below_availability_threshold")
 
 
 # ---------------------------------------------------------------------------
@@ -280,17 +280,6 @@ def test_statistics_mrn_not_found():
     assert exc["mrn"] == "MRNBAD"
     assert exc["reason"] == "mrn_not_found"
     assert exc["admissionNs"] is None
-
-
-def test_statistics_no_device_found():
-    """A patient with no device covering the window is excluded, and the window
-    that was searched is reported."""
-    exc = _one_exclusion(_post_stats(_mock_sdk(device_id=None), _body([("MRN001", [ADMIT_NS])])))
-
-    assert exc["reason"] == "no_device_found"
-    assert exc["admissionNs"] == ADMIT_NS
-    assert exc["windowStartNs"] == ADMIT_NS
-    assert exc["windowEndNs"] == ADMIT_NS + WINDOW_NS
 
 
 def test_statistics_below_availability_threshold():
@@ -444,15 +433,16 @@ def test_statistics_all_time_window_spans_admission_to_discharge():
     fixed offset from admission."""
     discharge_ns = ADMIT_NS + 72 * ONE_HOUR_NS  # deliberately unlike WINDOW_NS
 
-    # A no-device exclusion is the cheapest way to observe the window the
-    # resolver computed, since it reports the window it searched.
+    # An availability exclusion is the cheapest way to observe the window the
+    # resolver computed, since it reports the window it searched. LOW_COVERAGE
+    # spans 10h, well under the 72h window, so the entry is always dropped.
     resp = _post_stats(
-        _mock_sdk(device_id=None),
+        _mock_sdk(interval_arr=LOW_COVERAGE),
         _body([("MRN001", [(ADMIT_NS, discharge_ns)])], observation_window="all_time"),
     )
 
     exc = _one_exclusion(resp)
-    assert exc["reason"] == "no_device_found"
+    assert exc["reason"] == "below_availability_threshold"
     assert exc["windowStartNs"] == ADMIT_NS
     assert exc["windowEndNs"] == discharge_ns
 

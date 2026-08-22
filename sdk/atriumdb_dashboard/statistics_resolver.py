@@ -23,9 +23,8 @@ Processing pipeline per cohort:
   3a. MRN → patient_id resolution via ``sdk.get_patient_id``
   3b. Observation window = [admission_ns, admission_ns + observation_window], or
       [admission_ns, discharge_ns] when observation_window is "all_time"
-  3c. patient_id + window → device_id via ``sdk.convert_patient_to_device_id``
-  3d. Availability check via ``sdk.get_interval_array``
-   4. Value extraction via ``sdk.get_data`` + NaN removal + per-patient mean
+  3c. Availability check via ``sdk.get_interval_array``
+  3d. Value extraction via ``sdk.get_data`` + NaN removal + per-patient mean
 
 Every patient excluded at any stage is written to the exclusions logger so
 results can be audited without re-running. All log lines are prefixed with
@@ -75,9 +74,8 @@ def compute_aggregate_statistics(
     """Compute per-cohort per-patient mean signal values.
 
     The single entry point for S2. Resolves the requested measure once, then
-    iterates through each cohort, applying patient-ID resolution, device
-    resolution, availability filtering, and per-patient mean computation in
-    sequence.
+    iterates through each cohort, applying patient-ID resolution, availability
+    filtering, and per-patient mean computation in sequence.
 
     Exclusions are written to the
     ``atriumdb_dashboard.statistics_resolver.exclusions`` logger. To capture
@@ -203,28 +201,9 @@ def _process_cohort(
                 continue
             window_start_ns, window_end_ns = window
 
-            # Step 3c — device resolution
-            device_id = sdk.convert_patient_to_device_id(
-                start_time=window_start_ns,
-                end_time=window_end_ns,
-                patient_id=patient_id,
-            )
-            if device_id is None:
-                # print(f"[DEBUG] mrn={mrn}  admission_ns={admission_ns}  -> EXCLUDED: no_device_found")
-                exclusions.append(_make_exclusion(
-                    request_id=request_id,
-                    cohort_id=cohort_id,
-                    mrn=mrn,
-                    reason=ExclusionReason.NO_DEVICE_FOUND,
-                    admission_ns=admission_ns,
-                    window=(window_start_ns, window_end_ns),
-                ))
-                continue
-
-            # Step 3d — availability check
+            # Step 3c — availability check
             interval_arr = sdk.get_interval_array(
                 measure_id=measure_id,
-                device_id=device_id,
                 patient_id=patient_id,
                 start=window_start_ns,
                 end=window_end_ns,
@@ -239,7 +218,7 @@ def _process_cohort(
             availability = covered_ns / observation_window_ns
 
             if availability < request.availability_threshold:
-                # print(f"[DEBUG] mrn={mrn}  admission_ns={admission_ns}  device_id={device_id}  availability={availability:.3f}  -> EXCLUDED: below_availability_threshold")
+                # print(f"[DEBUG] mrn={mrn}  admission_ns={admission_ns}  availability={availability:.3f}  -> EXCLUDED: below_availability_threshold")
                 exclusions.append(_make_exclusion(
                     request_id=request_id,
                     cohort_id=cohort_id,
@@ -251,11 +230,10 @@ def _process_cohort(
                 ))
                 continue
 
-            # Step 4 — value extraction, value-range filtering, and per-entry mean
+            # Step 3d — value extraction, value-range filtering, and per-entry mean
             mean, reason, post_filter_availability = _extract_patient_mean(
                 sdk=sdk,
                 measure_id=measure_id,
-                device_id=device_id,
                 patient_id=patient_id,
                 window_start_ns=window_start_ns,
                 window_end_ns=window_end_ns,
@@ -468,13 +446,12 @@ def _fetch_demographics(
 
 
 # ---------------------------------------------------------------------------
-# Step 4 helper — value extraction
+# Step 3d helper — value extraction
 # ---------------------------------------------------------------------------
 
 def _extract_patient_mean(
     sdk: "AtriumSDK",
     measure_id: int,
-    device_id: int,
     patient_id: int,
     window_start_ns: int,
     window_end_ns: int,
@@ -491,7 +468,6 @@ def _extract_patient_mean(
     if value_range is None:
         _, _, values = sdk.get_data(
             measure_id=measure_id,
-            device_id=device_id,
             patient_id=patient_id,
             start_time_n=window_start_ns,
             end_time_n=window_end_ns,
@@ -511,7 +487,6 @@ def _extract_patient_mean(
     # how much data exists, not on how much of it falls inside the bounds.
     _, values = sdk.get_data(
         measure_id=measure_id,
-        device_id=device_id,
         patient_id=patient_id,
         start_time_n=window_start_ns,
         end_time_n=window_end_ns,

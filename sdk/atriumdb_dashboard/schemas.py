@@ -269,7 +269,6 @@ ALL_TIME = "all_time"
 
 class ExclusionReason(str, Enum):
     MRN_NOT_FOUND = "mrn_not_found"
-    NO_DEVICE_FOUND = "no_device_found"
     BELOW_AVAILABILITY_THRESHOLD = "below_availability_threshold"
     NO_USABLE_VALUES = "no_usable_values"
     MISSING_DISCHARGE_TIME = "missing_discharge_time"
