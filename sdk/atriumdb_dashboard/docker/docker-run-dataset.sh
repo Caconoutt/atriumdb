@@ -59,7 +59,7 @@ exec docker run --rm -it \
 # artifacts produced by `pip install -e`.
 
 # # Commands on direct peeking meta tables (after enter imgae)
-# # TODO: the measure table unit(freq_unit) insert is needed for get_measure_id
+
 # python -c "
 # import sqlite3
 # conn = sqlite3.connect('/data/atriumdb/meta/index.db')
