@@ -31,14 +31,24 @@ deployment check verifies ``/measures/`` (upstream) as well as
 ``/measures/hours``, ``/cohorts`` and ``/cohorts/statistics`` (dashboard).
 
 The SDK comes from :func:`~atriumdb_dashboard.api.dependencies.get_sdk_instance`,
-which reads ``ATRIUMDB_DATASET_LOCATION``.
+which reads ``ATRIUMDB_DATASET_LOCATION``. The upstream routes are pointed at it
+too, via ``dependency_overrides`` — see below.
 """
 
 from tests.mock_api.app import app as app
+from tests.mock_api.sdk_dependency import get_sdk_instance as _upstream_get_sdk
 
 from atriumdb_dashboard.api.app import mount_dashboard
+from atriumdb_dashboard.api.dependencies import get_sdk_instance
 
 mount_dashboard(app)
+
+# The upstream provider is ``return AtriumSDK()`` with no arguments, which raises
+# "dataset location must be specified for sqlite mode" on the first request to any
+# upstream route. Overriding it here rather than editing ``tests/mock_api`` is what
+# keeps that package byte-identical to upstream, and one entry covers every
+# upstream route since they all depend on the same function object.
+app.dependency_overrides[_upstream_get_sdk] = get_sdk_instance
 
 
 @app.get("/health")
