@@ -63,8 +63,13 @@ Documentation = "https://docs.atriumdb.io/"
 
 # Flat layout: the package root is this directory itself.
 [tool.setuptools]
-packages = ["atriumdb_dashboard", "atriumdb_dashboard.api"]
+packages = [
+    "atriumdb_dashboard",
+    "atriumdb_dashboard.api",
+    "atriumdb_dashboard.deploy",
+]
 
 [tool.setuptools.package-dir]
-"atriumdb_dashboard"     = "."
-"atriumdb_dashboard.api" = "api"
+"atriumdb_dashboard"        = "."
+"atriumdb_dashboard.api"    = "api"
+"atriumdb_dashboard.deploy" = "deploy"
