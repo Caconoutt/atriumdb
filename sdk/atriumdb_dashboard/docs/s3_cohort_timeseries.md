@@ -4,7 +4,7 @@ This document describes the implementation plan for a **time-series** view of a 
 
 It reuses the Step 2 request/patient/measure models and pipeline stages wherever possible; only the request additions (the interval width) and the response grouping (by interval bucket) are new.
 
-> **Status.** Sections 0–7 have been re-checked against the merged `atriumdb_dashboard` package as it exists on this branch. Where the original design assumed something the code does not do — notably a device-resolution stage — the plan below follows the code, and each such correction is called out inline.
+> **Status: implemented.** Sections 0–7 were re-checked against the merged `atriumdb_dashboard` package, then built. Where the original design assumed something the code does not do — notably a device-resolution stage — the plan follows the code, and each correction is called out inline. Three points where the *implementation* diverged from this plan are marked **Revised during implementation** in [2.2](#22--the-entry-enumeration-rule), [4.0](#40--extracting-the-shared-stages) and [4.1](#41--fetch-once-bucket-in-memory).
 
 ---
 
@@ -16,7 +16,7 @@ The original plan opened with a gate: the models it reuses lived only on `s2_coh
 |---|---|
 | `atriumdb/dashboard/schemas.py` | `sdk/atriumdb_dashboard/schemas.py` |
 | `atriumdb/dashboard/statistics_resolver.py` | `sdk/atriumdb_dashboard/statistics_resolver.py` |
-| `dashboard/pipeline.py` (proposed) | `sdk/atriumdb_dashboard/pipeline.py` (still to be created — [§4.0](#40--extracting-the-shared-stages)) |
+| `dashboard/pipeline.py` (proposed) | `sdk/atriumdb_dashboard/pipeline.py` ([§4.0](#40--extracting-the-shared-stages)) |
 
 The package rule that governs the whole layer: **`atriumdb_dashboard` imports from `atriumdb`, never the reverse**, so `sdk/atriumdb/` and `sdk/tests/mock_api/` stay byte-identical to upstream `main`. S3 adds only new files under `atriumdb_dashboard/` plus two small edits to existing dashboard files; it touches nothing upstream.
 
@@ -67,7 +67,7 @@ Returns: TimeSeriesResponse
 - `measure` — the signal to analyse (`MeasureIdentifier`). **Reused unchanged.**
 - `observation_window` — fixed window length in epoch ns, anchored at each admission (e.g. 24 h). See the [all_time decision](#52--observation-window-fixed-only-for-v1).
 - **`interval_ns`** *(new)* — bucket width in epoch ns (e.g. 5 min = `300_000_000_000`). The window is chopped into consecutive intervals of this width.
-- `availability_threshold` — minimum covered fraction, applied **per interval, and only per interval**. Unlike S2, S3 has **no window-level availability gate**: an entry is never dropped for being sparse across the observation window as a whole. It enters bucketing as long as it resolves a patient and a window, and its availability is then judged independently in each interval. A visit with data in only 3 of 288 intervals therefore appears in `patient_results` for those 3 and in `exclusions` for the other 285 — it is not excluded at the entry level.
+- `availability_threshold` — minimum covered fraction, applied **per interval, and only per interval**. **Required, with no default** ([3.2](#32-new-request-model)). Unlike S2, S3 has **no window-level availability gate**: an entry is never dropped for being sparse across the observation window as a whole. It enters bucketing as long as it resolves a patient and a window, and its availability is then judged independently in each interval. A visit with data in only 3 of 288 intervals therefore appears in `patient_results` for those 3 and in `exclusions` for the other 285 — it is not excluded at the entry level.
 - `value_range` — optional signal bounds (`ValueRangeMap`), same semantics as S2: out-of-range samples are treated as absent and reduce availability. **Reused unchanged**, applied per interval.
 
 **Interval convention:** interval `i` covers `[admission_ns + i·interval_ns, admission_ns + (i+1)·interval_ns)`, for `i` in `0 … (observation_window / interval_ns) − 1`. So interval `0` is the first 5 min of the stay, interval `1` the next 5 min, and so on — offsets from admission, identical across all patients in a cohort (which is what makes them plottable on one shared x-axis).
@@ -146,11 +146,11 @@ of which ~90 bytes is byte-identical across all 288 copies — `admissionNs` alo
 
 "Position in the request" needs one precise definition, because `visits` is entry-scoped while S2's `mrn_not_found` is patient-scoped. The rule:
 
-> Iterate `cohort.patients` in request order; within each, iterate `patient.admissions` in request order; emit one `VisitInfo` per admission. A patient with **no** admissions emits one placeholder entry with `admission_ns = null`.
+> Iterate `cohort.patients` in request order; within each, iterate `patient.admissions` in request order; emit one `VisitInfo` per admission. A patient with **no** admissions contributes no entries at all.
 
 So an unresolvable MRN carrying two admissions produces **two** `visits` entries and **two** `patient_exclusions` records, both `mrn_not_found`. This is the one place S3 deliberately differs from S2's exclusion cardinality (S2 logs `mrn_not_found` once per MRN), and it is forced by the index contract: every `visits` row must be referencable, so every row that was dropped needs its own record.
 
-The empty-admissions placeholder is defensive only — S1's resolver never emits a `PatientAdmission` without at least one qualifying admission — but it is the sole reason `VisitInfo.admission_ns` is nullable, so the branch should exist rather than let a malformed input raise.
+**Revised during implementation.** An earlier draft of this rule emitted a placeholder entry with `admission_ns = null` for a patient carrying no admissions, which is why `VisitInfo.admission_ns` was originally typed `int | None`. That was dropped: such an entry has no window to anchor and **no `ExclusionReason` member honestly describes it**, so it could only be recorded under a misleading reason or left as an unreferenced `visits` row — both worse than passing it over. The statistics endpoint already passes it over silently (its inner admission loop simply does not execute), so mirroring that keeps the two endpoints consistent. `admission_ns` is therefore non-nullable: every row in `visits` is anchored to a real admission. S1's resolver never emits a `PatientAdmission` without at least one qualifying admission, so this case is defensive either way.
 
 ---
 
@@ -197,11 +197,13 @@ class TimeSeriesRequest(_Base):
     measure: MeasureIdentifier
     observation_window: PositiveInt          # fixed only — no "all_time" in v1 (see 5.2)
     interval_ns: PositiveInt                 # bucket width, e.g. 5 min = 300_000_000_000
-    availability_threshold: float = 0.80     # applied PER interval
+    availability_threshold: float            # applied PER interval; REQUIRED, no default
     value_range: ValueRangeMap | None = None
 ```
 
 Deliberately **not** a subclass of `AggregateStatisticsRequest`: its `observation_window` type differs (`PositiveInt` vs `PositiveInt | Literal["all_time"]`), and inheriting a field only to narrow it is more confusing than declaring the four shared fields again. The field-level *types* are reused; the container is its own.
+
+**`availability_threshold` carries no default** — unlike S2's, which defaults to `0.80`. *Revised during implementation.* How much coverage makes a bucket mean trustworthy is the caller's judgement, and per [5.3](#53--interval-units-at-the-api-boundary) the dashboard server always sends the field, so a default could only ever fire for a caller who *forgot* it — silently discarding every bucket under 80% coverage for someone who never asked for filtering, in a way they cannot distinguish from a genuinely sparse signal. Requiring it makes the omission a loud `422` instead. A caller wanting no gate passes `0.0` explicitly.
 
 **Validation** — a single `model_validator(mode="after")` covering two checks, both surfacing as `422` through FastAPI's normal Pydantic handling (no endpoint code needed):
 
@@ -215,7 +217,7 @@ class VisitInfo(_Base):
     """One (patient, admission) entry. Demographics are at-admission and
     constant for the stay, so they live here, once, not on every interval."""
     mrn: str
-    admission_ns: int | None               # null only for a patient with no admissions (2.2)
+    admission_ns: int                      # always anchored to a real admission (2.2)
     sex: str | None = None                 # best-effort; absent => null
     age_months: int | None = None
     location: str | None = None
@@ -287,7 +289,7 @@ The reuse the original plan asked for is real but needs one refactor first: S2's
 
 | Helper in `statistics_resolver.py` | Reusable? | Action |
 |---|---|---|
-| `_observation_window(admission, observation_window)` | **Yes, verbatim** | Move to `pipeline.py` unchanged. Already takes scalars. Handles `ALL_TIME` — S3 simply never passes it |
+| `_observation_window(admission, observation_window)` | **Yes, verbatim** | Move to `pipeline.py` as `compute_observation_window` (renamed only to stop the module-level name shadowing its own parameter). Body unchanged; handles `ALL_TIME`, which S3 simply never passes |
 | `_age_months(dob_ns, admission_ns)` | **Yes, verbatim** | Move to `pipeline.py` unchanged |
 | `_fetch_demographics(sdk, patient_id, mrn, admission_ns, request_id)` | **Yes, verbatim** | Move to `pipeline.py` unchanged. Best-effort: returns `(None, None)` and never raises |
 | `_resolve_measure_id(sdk, request, request_id)` | After a signature change | Retake as `resolve_measure_id(sdk, measure: MeasureIdentifier, request_id)`. It only reads `request.measure` |
@@ -304,7 +306,6 @@ Keep the extracted names public (no leading underscore) in `pipeline.py`, since 
 ```
 resolve measure_id once for the request        (pipeline.resolve_measure_id)
 validate freq_nhz > 0 for that measure         (see 4.3)
-period_ns = sdk.get_measure_info(measure_id)["period_ns"]
 n_intervals = observation_window // interval_ns
 
 for each cohort:
@@ -326,7 +327,7 @@ for each cohort:
      _, values = sdk.get_data(measure_id, patient_id, window_start, window_end,
                               return_nan_filled=True)          # ONE call, regular grid
      usable = pipeline.usable_mask(values, value_range)
-     bucket boundaries b_i = round(i * interval_ns / period_ns)
+     bucket boundaries b_i = round(i * len(values) / n_intervals)   # integer, half-up
      for each interval i in 0 … n_intervals-1:
          slice = usable[b_i : b_{i+1}]
          availability = count_nonzero(slice) / len(slice)
@@ -347,7 +348,9 @@ for each cohort:
 
 **Bucketing mechanics.** Two details worth settling before writing the loop:
 
-- Compute boundaries as `b_i = round(i * interval_ns / period_ns)` rather than a fixed `samples_per_interval` stride. When `interval_ns` is not a whole multiple of `period_ns` (a 5 min bucket on a 0.7 Hz signal, say), rounding still yields a contiguous, non-overlapping, exhaustive partition, whereas a fixed stride silently drops a tail. **No validator for `interval_ns % period_ns`** — the divisibility rule in [5.1](#51--windowinterval-divisibility) is about window/interval only, and requiring bucket widths to divide the sample period would couple the API to per-measure metadata the caller does not have.
+- Compute boundaries as `b_i = round(i * len(values) / n_intervals)` — proportionally over the **actual returned grid**, not from `period_ns`. *Revised during implementation:* the original form, `round(i * interval_ns / period_ns)`, derives the partition from metadata independently of the array it indexes, so any disagreement between the SDK's grid sizing and ours becomes an off-by-N at the tail. Since [5.1](#51--windowinterval-divisibility) already guarantees every interval is the same width and the grid is uniform over the window, boundary `i` is exactly `i · n_samples / n_intervals`, and taking `n_samples` from `len(values)` makes the partition true by construction. It also drops `period_ns` from the hot path entirely — the measure's period is now consulted only for the aperiodic guard in [4.3](#43--aperiodic-measures).
+- Round half-up in **integer** arithmetic (`(i·n + k//2) // k`), not float: `i * n_samples` passes 2⁵³ for a long window on a high-rate signal, and a float intermediate would quietly lose exactness there.
+- **No validator for `interval_ns % period_ns`** — the divisibility rule in [5.1](#51--windowinterval-divisibility) is about window/interval only, and requiring bucket widths to divide the sample period would couple the API to per-measure metadata the caller does not have. A bucket narrower than a single sample simply comes out empty and is reported as `no_usable_values`.
 - Prefer `np.bincount(bucket_index[usable], weights=values[usable], minlength=n_intervals)` over `np.add.reduceat` for the per-bucket sums. `reduceat` returns the element at the index — not zero — when two consecutive boundaries coincide, which is exactly what happens for an empty bucket, and that failure is silent. `bincount` handles empty buckets natively.
 
 **Order of the two interval-level reasons.** Check the threshold first, then all-absent, matching `_extract_patient_mean`'s bounded branch. With any `availability_threshold > 0` an all-absent bucket fails the threshold first, so `no_usable_values` is reachable only when the threshold is `0` — same as in S2. Preserving the order keeps the two endpoints' reason semantics identical.
@@ -499,7 +502,7 @@ sdk/
 │   │                                                        MAX_INTERVALS)
 │   ├── pipeline.py                                 ← NEW: shared, request-model-agnostic stages
 │   │                                                       (resolve_measure_id, resolve_patient_ids,
-│   │                                                        observation_window, resolve_value_range,
+│   │                                                        compute_observation_window, resolve_value_range,
 │   │                                                        usable_mask, fetch_demographics, age_months)
 │   ├── statistics_resolver.py                      ← EDIT: call pipeline.py instead of its own
 │   │                                                       privates. Behaviour unchanged — §6.2
