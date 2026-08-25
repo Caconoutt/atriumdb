@@ -25,6 +25,7 @@ from atriumdb_dashboard.schemas import (
     MeasureIdentifier,
     PatientAdmission,
 )
+from atriumdb_dashboard.statistics_resolver import compute_aggregate_statistics
 
 # ---------------------------------------------------------------------------
 # Dataset guard — skip when no real data is mounted
