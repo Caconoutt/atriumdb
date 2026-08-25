@@ -17,11 +17,21 @@
 
 from __future__ import annotations
 
+import logging
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, PositiveInt, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    PositiveInt,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from pydantic.alias_generators import to_camel
+
+_LOGGER = logging.getLogger(__name__)
 
 
 #: Sex codes accepted in a demographic cohort filter. A patient whose
@@ -450,3 +460,293 @@ class AggregateStatisticsResponse(_Base):
     """Response body for ``POST /cohort/statistics``."""
 
     cohorts: list[CohortStatistics]
+
+
+# ---------------------------------------------------------------------------
+# S3 - Cohort time-series
+#
+# Same cohort/measure inputs as S2, but the observation window is chopped into
+# fixed-width intervals and a per-patient mean is reported for each. The models
+# below reuse S2's field types throughout; only the containers are new, because
+# the per-interval response normalises patient demographics into a per-cohort
+# ``visits`` table rather than repeating them on every bucket.
+# ---------------------------------------------------------------------------
+
+#: Upper bound on ``observation_window // interval_ns``. The response is
+#: O(intervals x visits), so an unbounded bucket count is a memory hazard well
+#: before it is a useful query: a 24 h window at 1 s buckets is 86,400 buckets,
+#: which across a few hundred visits is tens of millions of result objects. The
+#: intended range sits far below this (24 h at 1 min = 1,440), so the cap only
+#: ever catches a miscalibrated request — most likely an ``interval_ns`` that
+#: was never converted from minutes.
+MAX_INTERVALS = 2_000
+
+
+class TimeSeriesRequest(_Base):
+    """Request body for ``POST /cohorts/timeseries``.
+
+    Deliberately not a subclass of :class:`AggregateStatisticsRequest`: this
+    endpoint's ``observation_window`` cannot be ``"all_time"``, and inheriting a
+    field only to narrow it is more confusing than declaring the shared four
+    again. The field-level *types* are reused; the container is its own.
+
+    :param cohorts: One entry per cohort, each carrying the pre-resolved patient
+        list from the cohort resolver and, optionally, its own ``value_range``.
+    :param measure: Identifies the signal to analyse.
+    :param observation_window: Fixed window length in epoch nanoseconds,
+        anchored at each patient's ``admission_ns``. Unlike S2 there is no
+        ``"all_time"`` option: under ``all_time`` each stay would yield a
+        different number of buckets, so late intervals would silently contain
+        only the longer-staying patients and no shared x-axis would exist.
+    :param interval_ns: Bucket width in epoch nanoseconds — e.g. 5 min is
+        ``300_000_000_000``. The dashboard server converts the user's minute
+        selection before calling; AtriumDB does no unit inference, so a value of
+        ``5`` means 5 nanoseconds.
+    :param availability_threshold: Minimum fraction ``[0, 1]`` of a *bucket*
+        that must be covered by valid data for that bucket's mean to be
+        reported. Applied per interval and only per interval — this endpoint has
+        no window-level availability gate, so an entry is never dropped for
+        being sparse across the window as a whole.
+
+        **Required, with no default.** How much coverage makes a bucket mean
+        trustworthy is the caller's judgement, not this layer's: a default here
+        would silently discard data on behalf of a caller who never asked for
+        any filtering, and the caller could not tell that apart from a genuinely
+        sparse signal. Pass ``0.0`` to apply no threshold at all, in which case
+        a bucket is reported whenever it holds at least one usable sample.
+    :param value_range: Global signal bounds, keyed by measure tag, with the
+        same "out-of-range means absent" semantics as S2. A cohort's own
+        ``value_range`` is intersected with this one for that cohort. Applied
+        per interval.
+    """
+
+    cohorts: list[CohortInput]
+    measure: MeasureIdentifier
+    # Positive, and no "all_time": a time-series needs a bucket grid shared by
+    # every patient, which only a fixed window provides.
+    observation_window: PositiveInt
+    interval_ns: PositiveInt
+    # Required, deliberately: no default. See the field docs above.
+    availability_threshold: float
+    value_range: ValueRangeMap | None = None
+
+    @model_validator(mode="after")
+    def _window_divides_into_intervals(self) -> "TimeSeriesRequest":
+        """Reject a window the interval does not evenly divide, or too many buckets.
+
+        Even division is what makes every bucket exactly ``interval_ns`` wide,
+        so availability fractions are comparable across buckets and the bucket
+        count is unambiguous. Allowing a short trailing bucket is defensible but
+        pushes an edge case onto every downstream consumer.
+        """
+        if self.observation_window % self.interval_ns != 0:
+            raise ValueError(
+                f"observationWindow ({self.observation_window}) must be an exact "
+                f"multiple of intervalNs ({self.interval_ns}); it currently leaves "
+                f"a remainder of {self.observation_window % self.interval_ns} ns, "
+                f"which would make the final interval narrower than the rest."
+            )
+
+        n_intervals = self.observation_window // self.interval_ns
+        if n_intervals > MAX_INTERVALS:
+            raise ValueError(
+                f"observationWindow ({self.observation_window}) / intervalNs "
+                f"({self.interval_ns}) yields {n_intervals} intervals, above the "
+                f"limit of {MAX_INTERVALS}. Widen intervalNs — note it is "
+                f"denominated in nanoseconds, so a value meant as minutes will "
+                f"land here."
+            )
+        return self
+
+    # NOTE: this must stay the LAST model_validator declared on this class.
+    # A wrap validator only wraps the validation applied *below* it, so an
+    # ``after`` validator declared underneath this one would have its errors
+    # escape the logging entirely — silently, and only for that one check.
+    @model_validator(mode="wrap")
+    @classmethod
+    def _log_rejected_request(cls, data, handler):
+        """Log every rejection of this model, then re-raise unchanged.
+
+        Without this a rejected request leaves no server-side trace at all.
+        FastAPI's default ``RequestValidationError`` handler only builds a 422
+        response — it logs nothing — and uvicorn's access log records the status
+        code without the reason or any header, so a malformed request is
+        otherwise observable only as an anonymous ``422`` line. That matters
+        most for the divisibility and ``MAX_INTERVALS`` checks, which the
+        dashboard frontend is supposed to make unreachable: a 422 there signals
+        a frontend bug, and is exactly the thing worth having a record of.
+
+        Wrapping is what makes the coverage complete. Catching inside
+        :meth:`_window_divides_into_intervals` would log only that check, while
+        this catches field-level failures too — a missing
+        ``availabilityThreshold``, an ``"all_time"`` window, a malformed cohort.
+
+        Logged at WARNING deliberately: the deployment configures no logging, so
+        these loggers fall through to ``logging.lastResort``, which drops
+        anything below WARNING. A rejected request is not a server fault, but it
+        is not routine either.
+
+        Only the error locations and messages are logged, never
+        ``ValidationError.errors()[*]["input"]`` — the offending input is the
+        request body, which carries patient MRNs.
+
+        No request ID is available: a Pydantic model cannot see request headers,
+        and this runs before the endpoint function reads ``X-Request-ID``.
+        Correlating these lines to a request needs a
+        ``RequestValidationError`` handler, which does receive the ``Request``.
+        """
+        try:
+            return handler(data)
+        except ValidationError as exc:
+            details = "; ".join(
+                f"{'.'.join(str(part) for part in error['loc']) or '<request>'}: "
+                f"{error['msg']}"
+                for error in exc.errors()
+            )
+            _LOGGER.warning(
+                "Rejected %s: %d validation error(s): %s",
+                cls.__name__, exc.error_count(), details,
+            )
+            raise
+
+
+class VisitInfo(_Base):
+    """One (patient, admission) entry, with its demographics carried once.
+
+    Demographics are demographics-*at-admission*: for a given
+    ``(mrn, admission_ns)`` they are constant for the whole stay, so repeating
+    them on every interval is lossless to remove and substantial to carry — a
+    24 h / 5 min request holds 288 result rows per visit.
+
+    Every per-interval row in the response references one of these by its
+    position in :attr:`CohortTimeSeries.visits`, so the client has exactly one
+    resolution rule to learn: ``visits[row.visit]``.
+
+    :param mrn: Patient identifier.
+    :param admission_ns: The specific admission this entry is anchored to.
+        Distinguishes multiple entries for the same patient — a readmitted
+        patient has a different ``age_months`` and often a different
+        ``location`` per admission, which an MRN-keyed table would collapse.
+    :param sex: ``"M"`` or ``"F"``; ``None`` when unknown or not returned.
+    :param age_months: Age at admission in whole months (a 3y 4m old is 40).
+        ``None`` when unknown or not returned.
+    :param location: Encounter location for this admission. ``None`` when the
+        encounter has no unit recorded.
+    """
+
+    mrn: str
+    admission_ns: int
+    sex: str | None = None
+    age_months: int | None = None
+    location: str | None = None
+
+
+class VisitMean(_Base):
+    """One visit's mean signal value inside one interval.
+
+    The normalised counterpart of :class:`PatientResult`: same ``mean``
+    semantics, but the patient is named by index rather than by repeating the
+    MRN, admission timestamp and demographics on every bucket.
+
+    :param visit: 0-based index into the enclosing
+        :attr:`CohortTimeSeries.visits`.
+    :param mean: Mean of the usable samples in this interval.
+    """
+
+    visit: int
+    mean: float
+
+
+class VisitExclusion(_Base):
+    """One visit dropped, either before bucketing or from a single interval.
+
+    The normalised counterpart of :class:`ExclusionRecord`. Window bounds are
+    not carried: for an interval-level exclusion they are exactly the enclosing
+    :attr:`IntervalResult.start_offset_ns` / ``end_offset_ns``, so repeating
+    them per record would be pure duplication.
+
+    :param visit: 0-based index into the enclosing
+        :attr:`CohortTimeSeries.visits`.
+    :param reason: Why this visit was dropped. In
+        :attr:`CohortTimeSeries.patient_exclusions` this is always
+        ``mrn_not_found`` — the only entry-level drop reachable under a fixed
+        observation window. In :attr:`IntervalResult.exclusions` it is
+        ``below_availability_threshold`` or ``no_usable_values``.
+    :param availability: This interval's covered fraction ``[0, 1]``; present
+        only for ``below_availability_threshold``.
+    """
+
+    visit: int
+    reason: ExclusionReason
+    availability: float | None = None
+
+
+class IntervalResult(_Base):
+    """One bucket of the observation window, across every visit in the cohort.
+
+    Interval ``i`` covers ``[admission_ns + i*interval_ns,
+    admission_ns + (i+1)*interval_ns)``. Offsets are relative to each patient's
+    own admission, so the same index means the same elapsed time-since-admission
+    for every patient — which is what makes the series plottable on one shared
+    x-axis.
+
+    Intervals are always dense and complete, ``0 … n-1``. An interval where
+    every visit was excluded is still emitted, with an empty
+    ``patient_results``, so the client renders a visible gap rather than
+    interpolating across a missing index.
+
+    :param interval_index: 0-based position in the series.
+    :param start_offset_ns: ``interval_index * interval_ns``, offset from
+        admission — not an absolute timestamp.
+    :param end_offset_ns: ``(interval_index + 1) * interval_ns``.
+    :param n_included: Visits with a usable mean in this interval. Because there
+        is no window-level gate, this population varies per interval and
+        generally shrinks across the series as patients are discharged or come
+        off monitoring — plot it alongside each point, or a changing denominator
+        will read as a trend.
+    :param n_excluded: Visits dropped in this interval. ``n_included +
+        n_excluded`` equals :attr:`CohortTimeSeries.n_visits` in every interval.
+    :param patient_results: One entry per visit with a usable mean here.
+    :param exclusions: One record per visit dropped *in this interval*.
+    """
+
+    interval_index: int
+    start_offset_ns: int
+    end_offset_ns: int
+    n_included: int
+    n_excluded: int
+    patient_results: list[VisitMean]
+    exclusions: list[VisitExclusion]
+
+
+class CohortTimeSeries(_Base):
+    """Time-series result for one cohort.
+
+    :param cohort_id: Echoed from the corresponding ``CohortInput.id``.
+    :param n_patients: Distinct patients whose MRN resolved to a patient ID.
+    :param n_visits: (patient, admission) entries that reached bucketing.
+    :param visits: **Every** entry that entered the pipeline, including those
+        later excluded, in request order. Indices are assigned in a pass that
+        completes before any exclusion runs, so an index is simply the entry's
+        position in the request and cannot shift when an earlier entry is
+        dropped. Consequently ``len(visits) >= n_visits`` — the difference is
+        the entries dropped before bucketing — and ``len(visits)`` is not a
+        patient count.
+    :param patient_exclusions: Entries dropped before bucketing, removing them
+        from every interval. Recorded once here rather than repeated in all
+        ``n`` intervals.
+    :param intervals: The bucket series, dense and in ascending index order.
+    """
+
+    cohort_id: int
+    n_patients: int
+    n_visits: int
+    visits: list[VisitInfo]
+    patient_exclusions: list[VisitExclusion]
+    intervals: list[IntervalResult]
+
+
+class TimeSeriesResponse(_Base):
+    """Response body for ``POST /cohorts/timeseries``."""
+
+    cohorts: list[CohortTimeSeries]

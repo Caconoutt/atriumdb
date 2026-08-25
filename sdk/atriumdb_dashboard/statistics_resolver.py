@@ -26,6 +26,11 @@ Processing pipeline per cohort:
   3c. Availability check via ``sdk.get_interval_array``
   3d. Value extraction via ``sdk.get_data`` + NaN removal + per-patient mean
 
+Stages 3a, 3b, the value-range resolution and the demographics lookup are shared
+with the time-series endpoint and live in :mod:`atriumdb_dashboard.pipeline`.
+Stage 3c/3d stay here: the whole-window availability gate is exactly what S3
+must not inherit, so it is deliberately not shared.
+
 Every patient excluded at any stage is written to the exclusions logger so
 results can be audited without re-running. All log lines are prefixed with
 ``[request_id]`` for correlation across a single request.
@@ -34,14 +39,19 @@ results can be audited without re-running. All log lines are prefixed with
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import numpy as np
 
+from atriumdb_dashboard.pipeline import (
+    compute_observation_window,
+    fetch_demographics,
+    resolve_measure_id,
+    resolve_patient_ids,
+    resolve_value_range,
+    usable_mask,
+)
 from atriumdb_dashboard.schemas import (
-    ALL_TIME,
-    Admission,
     AggregateStatisticsRequest,
     AggregateStatisticsResponse,
     CohortInput,
@@ -98,7 +108,7 @@ def compute_aggregate_statistics(
         )
         raise ValueError("request_id must be a non-empty string.")
 
-    measure_id = _resolve_measure_id(sdk, request, request_id)
+    measure_id = resolve_measure_id(sdk, request.measure, request_id)
 
     cohort_results: list[CohortStatistics] = [
         _process_cohort(sdk, cohort, measure_id, request, request_id)
@@ -110,35 +120,6 @@ def compute_aggregate_statistics(
         request_id, len(cohort_results),
     )
     return AggregateStatisticsResponse(cohorts=cohort_results)
-
-
-# ---------------------------------------------------------------------------
-# Step 2 — Measure resolution
-# ---------------------------------------------------------------------------
-
-def _resolve_measure_id(
-    sdk: "AtriumSDK",
-    request: AggregateStatisticsRequest,
-    request_id: str,
-) -> int:
-    """Resolve the measure to an internal measure_id; raise if not found."""
-    m = request.measure
-    measure_id = sdk.get_measure_id(
-        m.measure_tag,
-        freq=m.freq,
-        units=m.units,
-        freq_units=m.freq_units,
-    )
-    if measure_id is None:
-        raise ValueError(
-            f"[{request_id}] Measure not found in dataset: tag='{m.measure_tag}', "
-            f"freq={m.freq} {m.freq_units}, units='{m.units}'"
-        )
-    _LOGGER.debug(
-        "[%s] Resolved measure '%s' (freq=%s %s, units=%s) -> measure_id=%d",
-        request_id, m.measure_tag, m.freq, m.freq_units, m.units, measure_id,
-    )
-    return measure_id
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +138,9 @@ def _process_cohort(
     patient_results: list[PatientResult] = []
     exclusions: list[ExclusionRecord] = []
 
-    value_range = _resolve_value_range(cohort, request, request_id)
+    value_range = resolve_value_range(
+        cohort, request.measure.measure_tag, request.value_range, request_id
+    )
 
     # Step 3a — resolve MRN → patient_id
     mrn_to_pid = _resolve_patient_ids(sdk, cohort, request_id, exclusions)
@@ -189,7 +172,7 @@ def _process_cohort(
             admission_ns = admission.admission_ns
 
             # Step 3b — observation window for this admission
-            window = _observation_window(admission, request.observation_window)
+            window = compute_observation_window(admission, request.observation_window)
             if window is None:
                 exclusions.append(_make_exclusion(
                     request_id=request_id,
@@ -254,7 +237,7 @@ def _process_cohort(
 
             # Demographics are only worth fetching for entries that survived the
             # filters, since they exist purely to populate the results table.
-            sex, age_months = _fetch_demographics(
+            sex, age_months = fetch_demographics(
                 sdk=sdk,
                 patient_id=patient_id,
                 mrn=mrn,
@@ -302,147 +285,24 @@ def _resolve_patient_ids(
     request_id: str,
     exclusions: list[ExclusionRecord],
 ) -> dict[str, int]:
-    """Return {mrn: patient_id} for MRNs that resolve; append exclusions for the rest."""
-    result: dict[str, int] = {}
+    """Return {mrn: patient_id} for MRNs that resolve; append exclusions for the rest.
+
+    The SDK loop itself is shared with the time-series endpoint
+    (:func:`~atriumdb_dashboard.pipeline.resolve_patient_ids`); only the
+    exclusion record it produces is S2-specific, which is why that half stays
+    here. One record is appended per unresolved *patient entry*, in request
+    order, so a duplicated bad MRN is reported once per occurrence.
+    """
+    resolved = resolve_patient_ids(sdk, cohort)
     for patient in cohort.patients:
-        mrn = patient.mrn
-        patient_id = sdk.get_patient_id(mrn=mrn)
-        if patient_id is None:
+        if patient.mrn not in resolved:
             exclusions.append(_make_exclusion(
                 request_id=request_id,
                 cohort_id=cohort.id,
-                mrn=mrn,
+                mrn=patient.mrn,
                 reason=ExclusionReason.MRN_NOT_FOUND,
             ))
-            continue
-        result[mrn] = patient_id
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Step 3b helper — observation window
-# ---------------------------------------------------------------------------
-
-def _observation_window(
-    admission: Admission,
-    observation_window: int | str,
-) -> tuple[int, int] | None:
-    """Return ``(start_ns, end_ns)`` for this admission, or None if unbounded.
-
-    A fixed window runs for ``observation_window`` nanoseconds from the
-    admission. Under ``"all_time"`` it instead spans the admission itself, so
-    the stay's own discharge is what ends it.
-
-    :return: The window, or ``None`` when ``"all_time"`` was requested but this
-        admission has no usable discharge — an open stay, or a discharge that
-        does not follow the admission. Such an entry has no window to measure
-        availability against, and the caller excludes it.
-    """
-    if observation_window != ALL_TIME:
-        return admission.admission_ns, admission.admission_ns + observation_window
-
-    if admission.discharge_ns is None or admission.discharge_ns <= admission.admission_ns:
-        return None
-
-    return admission.admission_ns, admission.discharge_ns
-
-
-# ---------------------------------------------------------------------------
-# Value-range resolution
-# ---------------------------------------------------------------------------
-
-def _resolve_value_range(
-    cohort: CohortInput,
-    request: AggregateStatisticsRequest,
-    request_id: str,
-) -> ValueRange | None:
-    """Return the bounds in force for this cohort, or None if the signal is unbounded.
-
-    Both maps are keyed by measure tag, and only the tag named by the request's
-    ``measure`` is ever consulted — bounds keyed by any other tag do not apply.
-
-    When a cohort and the global request both bound the tag, the two are
-    intersected rather than one replacing the other: the tighter of the two
-    bounds wins at each end independently, so a value must satisfy both to
-    count. An end left open (``None``) constrains nothing, so the other side's
-    bound carries. When only one of the two is present it applies on its own.
-    """
-    tag = request.measure.measure_tag
-
-    global_range = (request.value_range or {}).get(tag)
-    cohort_range = (cohort.value_range or {}).get(tag)
-
-    lowers = [r.lower for r in (global_range, cohort_range) if r is not None and r.lower is not None]
-    uppers = [r.upper for r in (global_range, cohort_range) if r is not None and r.upper is not None]
-
-    # Tighter bound wins at each end: the highest floor, the lowest ceiling.
-    lower = max(lowers) if lowers else None
-    upper = min(uppers) if uppers else None
-
-    if lower is None and upper is None:
-        _LOGGER.debug(
-            "[%s] Cohort %s: no value range in force for tag '%s' — signal unbounded.",
-            request_id, cohort.id, tag,
-        )
-        return None
-
-    _LOGGER.debug(
-        "[%s] Cohort %s: value range for tag '%s' (global=%s, cohort=%s) -> lower=%s, upper=%s",
-        request_id, cohort.id, tag, global_range, cohort_range, lower, upper,
-    )
-    return ValueRange(lower=lower, upper=upper)
-
-
-# ---------------------------------------------------------------------------
-# Demographics — sex and age-at-admission for the Data Records table
-# ---------------------------------------------------------------------------
-
-def _age_months(dob_ns: int, admission_ns: int) -> int | None:
-    """Whole months elapsed from ``dob_ns`` to ``admission_ns`` (3y 4m -> 40).
-
-    Counted on the calendar rather than by dividing a nanosecond span, so month
-    lengths don't accumulate drift. The final month only counts once the day of
-    the month is reached.
-    """
-    dob = datetime.fromtimestamp(dob_ns / 1e9, tz=timezone.utc)
-    admitted = datetime.fromtimestamp(admission_ns / 1e9, tz=timezone.utc)
-
-    months = (admitted.year - dob.year) * 12 + (admitted.month - dob.month)
-    if admitted.day < dob.day:
-        months -= 1
-
-    # A dob after the admission means the record is inconsistent; report unknown
-    # rather than a negative age.
-    return months if months >= 0 else None
-
-
-def _fetch_demographics(
-    sdk: "AtriumSDK",
-    patient_id: int,
-    mrn: str,
-    admission_ns: int,
-    request_id: str,
-) -> tuple[str | None, int | None]:
-    """Return ``(sex, age_months)`` as of this admission; either may be None.
-
-    Demographics are best-effort: a dataset that does not record gender or dob
-    yields ``None``, which the dashboard renders as an em-dash. Missing values
-    never exclude an entry.
-    """
-    info = sdk.get_patient_info(patient_id=patient_id, time=admission_ns)
-    if info is None:
-        _LOGGER.debug(
-            "[%s] mrn=%s: get_patient_info returned no record at admission_ns=%d.",
-            request_id, mrn, admission_ns,
-        )
-        return None, None
-
-    sex = info.get("gender") or None
-
-    dob_ns = info.get("dob")
-    age_months = None if dob_ns is None else _age_months(dob_ns, admission_ns)
-
-    return sex, age_months
+    return resolved
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +334,7 @@ def _extract_patient_mean(
         )
         if values is None:
             values = np.array([])
-        values = values[~np.isnan(values)]
+        values = values[usable_mask(values, None)]
         if len(values) == 0:
             return None, ExclusionReason.NO_USABLE_VALUES, None
         return float(np.mean(values)), None, None
@@ -495,11 +355,7 @@ def _extract_patient_mean(
     if values is None or len(values) == 0:
         return None, ExclusionReason.NO_USABLE_VALUES, None
 
-    usable = ~np.isnan(values)
-    if value_range.lower is not None:
-        usable &= values >= value_range.lower
-    if value_range.upper is not None:
-        usable &= values <= value_range.upper
+    usable = usable_mask(values, value_range)
 
     availability = float(np.count_nonzero(usable)) / len(values)
     if availability < availability_threshold:
