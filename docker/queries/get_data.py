@@ -47,7 +47,7 @@ def to_ns(date_str: str) -> int:
 # ============================== EDIT BELOW ==============================
 
 # --- which signal: either MEASURE_ID, or the tag/freq/units triple ---
-MEASURE_ID = None                              # set this to skip the lookup
+MEASURE_ID = 11                              # set this to skip the lookup
 MEASURE_TAG = "MDC_ECG_CARD_BEAT_RATE"
 MEASURE_FREQ = 976562500                       # in MEASURE_FREQ_UNITS
 MEASURE_UNITS = "nHz"                          # the measure table's unit column
