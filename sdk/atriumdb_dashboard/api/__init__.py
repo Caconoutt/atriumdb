@@ -32,6 +32,7 @@ from atriumdb_dashboard.api.cohort_endpoints import router as cohort_router
 from atriumdb_dashboard.api.dependencies import get_sdk_instance
 from atriumdb_dashboard.api.measures_endpoints import router as measures_router
 from atriumdb_dashboard.api.statistics_endpoints import router as statistics_router
+from atriumdb_dashboard.api.timeseries_endpoints import router as timeseries_router
 
 __all__ = [
     "COHORT_PREFIX",
@@ -42,4 +43,5 @@ __all__ = [
     "measures_router",
     "mount_dashboard",
     "statistics_router",
+    "timeseries_router",
 ]

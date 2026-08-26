@@ -46,6 +46,25 @@ Compose builds `sdk/atriumdb_dashboard/docker/Dockerfile` from the sibling check
 > carrying only `context:` will fail with "Dockerfile not found". Context stays
 > `../atriumdb/sdk` — the build needs the whole `sdk/` tree.
 
+### Logging environment variables
+
+Both are optional; `server.py` configures logging at import either way.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `ATRIUMDB_DASHBOARD_LOG_LEVEL` | `INFO` | Level for every `atriumdb_dashboard.*` logger. Set `DEBUG` to surface per-request diagnostics — measure and value-range resolution, per-cohort counts, and the full sample grid fetched for each patient. An unrecognised value logs a warning and falls back rather than stopping the container. |
+| `ATRIUMDB_DASHBOARD_EXCLUSION_LOG` | unset | Path for the exclusion audit trail. When set, the statistics and time-series `*.exclusions` loggers write there instead of the console, giving a file that records why each patient was dropped. Mount it on a writable volume — an unwritable path fails at startup by design, since an audit trail that silently goes nowhere is worse than a container that refuses to boot. |
+
+> **`DEBUG` is not a level to leave on.** The resolvers log the whole NaN-filled
+> value grid per patient at DEBUG; a 24 h window at 1 Hz is roughly 1 MB per
+> patient per request, so a few hundred patients is hundreds of MB of log for a
+> single call. Turn it on for a targeted trace, then turn it back off.
+
+Without these, uvicorn's own `dictConfig` configures only its three loggers, so
+the dashboard's records fall through to Python's `lastResort` handler — every
+`debug()` call discarded, and the surviving warnings printed with no timestamp,
+level or logger name.
+
 The image's default command serves the API
 (`uvicorn atriumdb_dashboard.deploy.server:app --host 0.0.0.0 --port 8000`), so the
 `command:` override that older copies of `docker-compose.yml` carry should be

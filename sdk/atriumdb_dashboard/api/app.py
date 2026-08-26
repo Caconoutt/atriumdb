@@ -27,6 +27,7 @@ from __future__ import annotations
 from atriumdb_dashboard.api.cohort_endpoints import router as cohort_router
 from atriumdb_dashboard.api.measures_endpoints import router as measures_router
 from atriumdb_dashboard.api.statistics_endpoints import router as statistics_router
+from atriumdb_dashboard.api.timeseries_endpoints import router as timeseries_router
 
 COHORT_PREFIX = "/cohorts"
 MEASURES_PREFIX = "/measures"
@@ -79,24 +80,28 @@ def mount_dashboard(
     endpoint modules, keeping the upstream AtriumDB test app byte-identical to
     ``main``.
 
-    The cohorts and statistics routers share the ``/cohorts`` prefix and serve
-    distinct literal paths — ``POST /cohorts`` resolves a cohort definition,
-    ``POST /cohorts/statistics`` computes statistics over already-resolved
-    cohorts — so their order relative to each other does not matter.
+    The cohorts, statistics and time-series routers share the ``/cohorts``
+    prefix and serve distinct literal paths — ``POST /cohorts`` resolves a
+    cohort definition, ``POST /cohorts/statistics`` computes statistics over
+    already-resolved cohorts, and ``POST /cohorts/timeseries`` computes those
+    statistics per interval — so their order relative to each other does not
+    matter.
 
     All routers share one SDK provider,
     :func:`~atriumdb_dashboard.api.dependencies.get_sdk_instance`, so a single
     ``app.dependency_overrides`` entry covers every dashboard route.
 
     :param app: The FastAPI application to mount onto.
-    :param cohort_prefix: URL prefix shared by the cohorts and statistics
-        routers, serving ``POST /cohorts`` and ``POST /cohorts/statistics``.
+    :param cohort_prefix: URL prefix shared by the cohorts, statistics and
+        time-series routers, serving ``POST /cohorts``,
+        ``POST /cohorts/statistics`` and ``POST /cohorts/timeseries``.
     :param measures_prefix: URL prefix for the measures router, serving
         ``GET /measures/hours``.
     :return: The same ``app``, to allow chaining.
     """
     _mount_router(app, cohort_router, cohort_prefix)
     _mount_router(app, statistics_router, cohort_prefix)
+    _mount_router(app, timeseries_router, cohort_prefix)
     _mount_router(app, measures_router, measures_prefix)
     return app
 
