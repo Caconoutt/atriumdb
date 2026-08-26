@@ -267,6 +267,7 @@ def _process_cohort(
             patient_id=patient_id,
             window_start_ns=window_start_ns,
             window_end_ns=window_end_ns,
+            request_id=request_id,
         )
 
         _bucket_visit(
@@ -362,6 +363,7 @@ def _fetch_window_values(
     patient_id: int,
     window_start_ns: int,
     window_end_ns: int,
+    request_id: str,
 ) -> np.ndarray:
     """Fetch the whole window as one regular, NaN-filled sample grid.
 
@@ -388,6 +390,22 @@ def _fetch_window_values(
         end_time_n=window_end_ns,
         return_nan_filled=True,
     )
+    # Guarded rather than relying on lazy %s formatting: lazy formatting defers
+    # the % operation, not the evaluation of the arguments, so array2string would
+    # build its ~1 MB string on every entry even with DEBUG off.
+    if _LOGGER.isEnabledFor(logging.DEBUG):
+        _LOGGER.debug(
+            "[%s] get_data measure_id=%s patient_id=%s window=[%s, %s] "
+            "n_values=%s values=%s",
+            request_id, measure_id, patient_id, window_start_ns, window_end_ns,
+            "None" if values is None else len(values),
+            # threshold=size defeats numpy's default summarisation, which would
+            # otherwise render a 24 h grid as "[0. 1. 2. ... 86398. 86399.]".
+            # max_line_width keeps it on one line so the record stays one line.
+            "None" if values is None else np.array2string(
+                values, threshold=values.size, max_line_width=10 ** 9,
+            ),
+        )
     if values is None:
         return np.array([], dtype=np.float64)
     # float64 explicitly: usable_mask calls np.isnan, which rejects integer
