@@ -81,6 +81,24 @@ Reading the results:
 
 - **200 on `/openapi.json` with `/sdk/blocks` present** — that base URL is your
   `ATRIUMDB_API_URL`.
+
+### Include the version segment
+
+The SDK appends bare endpoint names to `ATRIUMDB_API_URL` —
+`_request("GET", "measures/")` becomes `{api_url}/measures/`, and `"measures/"`
+is hardcoded at `atrium_sdk.py:2002`, `:2137` and `:2216`. There is no setting
+for a version prefix and `sdk/atriumdb/` is kept byte-identical to upstream, so
+the prefix must be part of the base URL:
+
+```
+routes served:  /v1/measures, /v1/patients/{id}, ...
+docs at:        https://host/api/docs
+                ->  ATRIUMDB_API_URL=https://host/api/v1
+```
+
+Getting this wrong 404s every request, in both `--raw` and SDK modes. Putting it
+in the base URL is also what keeps those two modes equivalent — they build the
+same URL, so `--raw` stays a true diagnostic for the SDK path.
 - **401 or 403** — the route *exists* and is protected. Still a hit; the base URL
   is probably right and the token is the problem.
 - **404 everywhere** — the base URL is not derivable from the audience. Ask.
@@ -154,12 +172,53 @@ possible proof that auth, routing and the SDK's api mode all work.
 
 Not needed for stage 1, only for stage 2:
 
-- SDK installed with the **`[remote]`** extra — `pip3 install -e "sdk[remote]"`.
-  The `[cli]` extra alone omits `websockets` and `PyJWT[crypto]`.
-- **`libTSC.so` built for Linux.** Still required in remote mode: waveform
-  blocks arrive compressed and are decoded on your side. Metadata calls like
-  `get_all_measures()` do not decode anything, but the SDK loads the library at
-  construction regardless.
+- SDK installed with the **`[remote]`** extra. The `[cli]` extra alone omits
+  `websockets` and `PyJWT[crypto]`.
+
+  **From PyPI (simplest):**
+
+  ```bash
+  pip3 install "atriumdb[remote]"
+  ```
+
+  The published `atriumdb-2.6.0-py3-none-any.whl` bundles `bin/libTSC.so` built
+  for **x86-64**, so on an x86-64 Linux host nothing needs compiling. Check
+  `uname -m` first — on aarch64 the bundled library will not load and you must
+  build from source.
+
+  **From this repo (only if you need local changes, e.g. the dashboard):**
+
+  ```bash
+  pip3 install -e "./sdk[remote]"
+  ```
+
+  This does *not* bring a Linux `libTSC.so` — `sdk/bin/libTSC.so` is gitignored
+  and tracked on no branch, so a fresh clone has none. Either build it:
+
+  ```bash
+  sudo apt-get install -y build-essential cmake libzstd-dev liblz4-dev
+  cmake -S tsc-lib -B build -DCMAKE_BUILD_TYPE=Release
+  cmake --build build --target Block -j"$(nproc)"
+  cp build/src/Block/libTSC.so sdk/bin/libTSC.so
+  ```
+
+  or lift the prebuilt one out of the wheel:
+
+  ```bash
+  pip3 download --no-deps atriumdb==2.6.0 -d /tmp/adb
+  unzip -j /tmp/adb/atriumdb-*.whl "bin/libTSC.so" -d sdk/bin/
+  file sdk/bin/libTSC.so        # expect: ELF 64-bit ... x86-64
+  ```
+
+- **`libTSC.so` is required even for metadata.** The SDK loads it in
+  `__init__` (`atrium_sdk.py:180`) before it looks at the connection type, so
+  `get_all_measures()` needs it despite decoding nothing. `--raw` is the way
+  around this on a machine where the library is unavailable.
+
+> The install page at docs.atriumdb.io is **out of date**: it describes
+> `[remote]` as installing `auth0-python` and `qrcodeT`. The actual 2.6.0
+> package installs `requests`, `PyJWT[crypto]`, `python-dotenv` and
+> `websockets`, matching `sdk/pyproject.toml`. Trust the pyproject.
 - Outbound **`https://`** and **`wss://`** to the API host. Metadata goes over
   REST; `get_data()` needs the websocket.
 
