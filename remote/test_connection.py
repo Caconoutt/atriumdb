@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Prove the remote AtriumDB connection works, using measures only.
 
-    python remote/test_connection.py
+    python3 remote/test_connection.py
 
 Builds an AtriumSDK in "api" mode against the remote server and calls
 get_all_measures(), which the SDK serves from `GET {api_url}/measures/`.
@@ -12,7 +12,7 @@ The token comes from ATRIUMDB_API_TOKEN if set, otherwise it is minted by
 auth0_token.get_token(). Setting the variable lets you iterate without hitting
 Auth0 on every run:
 
-    export ATRIUMDB_API_TOKEN=$(python remote/auth0_token.py)
+    export ATRIUMDB_API_TOKEN=$(python3 remote/auth0_token.py)
 
 Must run inside the container: AtriumSDK.__init__ raises OSError on macOS
 before it looks at the connection type, so even a pure-remote client cannot
@@ -23,7 +23,7 @@ import sys
 
 # Imported before atriumdb so a missing credential fails fast, on any platform,
 # rather than after the macOS guard has already stopped the script.
-from auth0_token import decode_claims, get_token
+from auth0_token import _load_dotenv, decode_claims, get_token
 
 
 def _resolve_api_url() -> str:
@@ -66,7 +66,7 @@ def _explain(error: Exception, api_url: str) -> str:
         return (
             "The API rejected the token.\n"
             "  - the token's 'aud' claim must match what the server expects "
-            "(check with: python remote/auth0_token.py --decode)\n"
+            "(check with: python3 remote/auth0_token.py --decode)\n"
             "  - the token may have expired; mint a fresh one\n"
             "  - the client may not be authorised for this API in Auth0"
         )
@@ -81,6 +81,11 @@ def _explain(error: Exception, api_url: str) -> str:
 
 
 def main():
+    # Must happen before anything reads os.environ: get_token() loads remote/.env
+    # itself, but the API URL is resolved first and would otherwise be looked up
+    # against an environment the file has not been merged into yet.
+    _load_dotenv()
+
     api_url = _resolve_api_url()
     token = _resolve_token()
 

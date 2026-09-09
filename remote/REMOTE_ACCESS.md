@@ -67,8 +67,8 @@ Failing that, the audience is a reasonable first guess (convention is to use the
 real URL as the identifier) and it is testable:
 
 ```bash
-python remote/discover_api_url.py                    # starts from AUTH0_AUDIENCE
-python remote/discover_api_url.py https://host/api   # or an explicit guess
+python3 remote/discover_api_url.py                    # starts from AUTH0_AUDIENCE
+python3 remote/discover_api_url.py https://host/api   # or an explicit guess
 ```
 
 It probes the usual prefixes (``, `/api`, `/api/v1`, `/v1`, `/atriumdb`) against
@@ -99,8 +99,8 @@ $EDITOR remote/.env          # fill in the five Auth0 values + ATRIUMDB_API_URL
 `auth0_token.py` does not import the SDK, so it runs on your laptop.
 
 ```bash
-pip install requests python-dotenv     # if not already present
-python remote/auth0_token.py --decode
+pip3 install requests python-dotenv     # if not already present
+python3 remote/auth0_token.py --decode
 ```
 
 Success prints the token on stdout and its claims on stderr. Check two things:
@@ -114,7 +114,7 @@ with AtriumDB yet. See Troubleshooting.
 You can also confirm the API accepts it without any Python:
 
 ```bash
-TOKEN=$(python remote/auth0_token.py)
+TOKEN=$(python3 remote/auth0_token.py)
 curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOKEN" \
   "$ATRIUMDB_API_URL/measures/"
 ```
@@ -128,8 +128,8 @@ connection type, so this cannot run on your laptop even though no local dataset
 is involved. Inside the container:
 
 ```bash
-export ATRIUMDB_API_TOKEN=$(python remote/auth0_token.py)   # optional, avoids re-minting
-python remote/test_connection.py
+export ATRIUMDB_API_TOKEN=$(python3 remote/auth0_token.py)   # optional, avoids re-minting
+python3 remote/test_connection.py
 ```
 
 Expected output:
@@ -154,7 +154,7 @@ possible proof that auth, routing and the SDK's api mode all work.
 
 Not needed for stage 1, only for stage 2:
 
-- SDK installed with the **`[remote]`** extra — `pip install -e "sdk[remote]"`.
+- SDK installed with the **`[remote]`** extra — `pip3 install -e "sdk[remote]"`.
   The `[cli]` extra alone omits `websockets` and `PyJWT[crypto]`.
 - **`libTSC.so` built for Linux.** Still required in remote mode: waveform
   blocks arrive compressed and are decoded on your side. Metadata calls like

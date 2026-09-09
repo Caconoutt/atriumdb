@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Mint an Auth0 access token with the client-credentials (M2M) flow.
 
-    python remote/auth0_token.py            # print the token
-    python remote/auth0_token.py --decode   # print the token's claims too
+    python3 remote/auth0_token.py            # print the token
+    python3 remote/auth0_token.py --decode   # print the token's claims too
 
 This is the Python form of the curl command the API provider gave you: it POSTs
 {client_id, client_secret, audience, grant_type} to the tenant's /oauth/token
@@ -21,6 +21,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
@@ -37,11 +38,23 @@ def _load_dotenv():
     Optional on purpose: the script must still work in a container where the
     values arrive as real environment variables and no .env file exists.
     """
+    dotenv_path = Path(__file__).with_name(".env")
+
     try:
         from dotenv import load_dotenv
     except ImportError:
+        # Silence here would be confusing: values sitting in remote/.env would
+        # simply be ignored and every variable would look unset.
+        if dotenv_path.exists():
+            print(
+                f"warning: {dotenv_path.name} exists but python-dotenv is not "
+                "installed, so it cannot be read.\n"
+                "         pip3 install python-dotenv   (or export the variables)",
+                file=sys.stderr,
+            )
         return
-    load_dotenv(dotenv_path=Path(__file__).with_name(".env"), override=False)
+
+    load_dotenv(dotenv_path=dotenv_path, override=False)
 
 
 def _read_config() -> dict:
@@ -50,10 +63,18 @@ def _read_config() -> dict:
 
     missing = [name for name in REQUIRED_VARS if not os.environ.get(name)]
     if missing:
+        dotenv_path = Path(__file__).with_name(".env")
+        # Naming the file and whether it exists turns the two very different
+        # causes - "no config file" and "config file missing a key" - into
+        # distinguishable errors.
+        hint = (
+            f"{dotenv_path} does not exist.\n"
+            "  cp remote/.env.example remote/.env   then fill it in"
+            if not dotenv_path.exists()
+            else f"Set them in {dotenv_path}."
+        )
         sys.exit(
-            "Missing required environment variable(s): "
-            + ", ".join(missing)
-            + "\nCopy remote/.env.example to remote/.env and fill it in."
+            "Missing required environment variable(s): " + ", ".join(missing) + "\n" + hint
         )
 
     return {
@@ -67,6 +88,77 @@ def _read_config() -> dict:
     }
 
 
+def _normalize_tenant(tenant: str) -> str:
+    """Return the tenant as an https origin, with any path stripped.
+
+    Auth0 has required TLS since 2024-10-07 and answers plaintext requests with
+    HTTP 426, so an http:// value is upgraded rather than passed through - there
+    is no case where talking to Auth0 unencrypted is correct.
+
+    Also drops any path, so pasting a full token URL
+    ("https://tenant.auth0.com/oauth/token") does not produce a doubled path.
+
+    :param tenant: Tenant as configured - bare host, or with a scheme.
+    :return: An origin of the form "https://host".
+    :rtype: str
+    """
+    tenant = tenant.strip()
+
+    if tenant.startswith("http://"):
+        print(
+            "warning: AUTH0_TENANT starts with http:// - using https:// instead "
+            "(Auth0 rejects plaintext with HTTP 426)",
+            file=sys.stderr,
+        )
+        tenant = "https://" + tenant[len("http://"):]
+    elif not tenant.startswith("https://"):
+        tenant = f"https://{tenant}"
+
+    parts = urlsplit(tenant)
+    return urlunsplit((parts.scheme, parts.netloc, "", "", ""))
+
+
+def _explain_status(status_code: int) -> str:
+    """Return guidance matching the HTTP status Auth0 returned.
+
+    Status-specific on purpose: printing the OAuth error codes for a transport
+    failure like 426 sends you looking at the wrong thing entirely.
+
+    :param status_code: The HTTP status from the token request.
+    :return: A human-readable explanation.
+    :rtype: str
+    """
+    if status_code == 426:
+        return (
+            "HTTP 426 is a transport problem, not a credentials problem.\n"
+            "Auth0 has required TLS since 2024-10-07 and rejects plaintext http://.\n"
+            "  - check AUTH0_TENANT in remote/.env: it must be a bare host\n"
+            "    (tenant.us.auth0.com) or start with https://, never http://\n"
+            "  - an http_proxy/HTTPS_PROXY that downgrades the connection\n"
+            "    will also cause this"
+        )
+    if status_code in (401, 403):
+        return (
+            "Common causes:\n"
+            "  access_denied       - the client is not authorised for this audience\n"
+            "  unauthorized_client - the grant type is not enabled on the application\n"
+            "  invalid_client      - wrong client_id or client_secret"
+        )
+    if status_code == 400:
+        return (
+            "Auth0 rejected the request body. Check that grant_type is\n"
+            "'client_credentials' and that the audience is spelled exactly as given."
+        )
+    if status_code == 404:
+        return (
+            "No /oauth/token at that host - AUTH0_TENANT is probably wrong.\n"
+            "It is the Auth0 tenant domain, not the API you are calling."
+        )
+    if status_code == 429:
+        return "Rate limited by Auth0. Reuse one token per process rather than minting per call."
+    return "See the response body above for what Auth0 objected to."
+
+
 def get_token() -> str:
     """Mint and return an access token.
 
@@ -78,11 +170,7 @@ def get_token() -> str:
     """
     cfg = _read_config()
 
-    # The tenant may be given bare ("example.us.auth0.com") or with a scheme;
-    # normalise so both work.
-    tenant = cfg["tenant"]
-    if not tenant.startswith(("http://", "https://")):
-        tenant = f"https://{tenant}"
+    tenant = _normalize_tenant(cfg["tenant"])
 
     response = requests.post(
         f"{tenant}{TOKEN_PATH}",
@@ -101,10 +189,7 @@ def get_token() -> str:
         sys.exit(
             f"Auth0 rejected the request (HTTP {response.status_code}).\n"
             f"{response.text}\n\n"
-            "Common causes:\n"
-            "  access_denied      - the client is not authorised for this audience\n"
-            "  unauthorized_client- the grant type is not enabled on the application\n"
-            "  invalid_client     - wrong client_id or client_secret"
+            + _explain_status(response.status_code)
         )
 
     payload = response.json()

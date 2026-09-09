@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Find the AtriumDB API base URL by probing candidates derived from the audience.
 
-    python remote/discover_api_url.py                    # start from AUTH0_AUDIENCE
-    python remote/discover_api_url.py https://host/api   # or an explicit guess
+    python3 remote/discover_api_url.py                    # start from AUTH0_AUDIENCE
+    python3 remote/discover_api_url.py https://host/api   # or an explicit guess
 
 An Auth0 audience is an identifier, not necessarily a reachable URL, so the
 audience is only a starting point. This tries the usual path prefixes against
@@ -65,6 +65,14 @@ def _routes_from_openapi(response) -> list:
 
 
 def main():
+    # Same reason as test_connection.py: AUTH0_AUDIENCE below is read straight
+    # from the environment, and get_token() (which loads remote/.env) is skipped
+    # entirely when ATRIUMDB_API_TOKEN is already set.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from auth0_token import _load_dotenv
+
+    _load_dotenv()
+
     token = os.environ.get("ATRIUMDB_API_TOKEN", "").strip() or None
     if not token:
         # A token is optional - an unauthenticated 401 still proves a route
@@ -83,7 +91,7 @@ def main():
     if not start:
         sys.exit(
             "Nothing to probe. Pass a URL, or set AUTH0_AUDIENCE in remote/.env:\n"
-            "  python remote/discover_api_url.py https://<host>/api"
+            "  python3 remote/discover_api_url.py https://<host>/api"
         )
 
     print(f"starting from: {start}\n")
