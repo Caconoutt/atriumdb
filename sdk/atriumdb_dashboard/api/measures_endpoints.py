@@ -17,16 +17,16 @@
 
 """FastAPI router exposing the dashboard's measure-statistics endpoints.
 
-Takes its SDK from :mod:`atriumdb_dashboard.api.dependencies`, shared with every
-other dashboard router, so the package stays self-contained (nothing is borrowed
-from the test package) and a single ``app.dependency_overrides`` entry swaps the
-SDK for all routers at once.
+Takes the direct-DB SDK from
+:func:`~atriumdb_dashboard.api.dependencies.get_meta_sdk`: this endpoint sums
+``block_index.num_values`` in raw SQL, which needs ``sdk.sql_handler`` and so
+cannot run in api mode.
 """
 
 from fastapi import APIRouter, Depends
 
 from atriumdb import AtriumSDK
-from atriumdb_dashboard.api.dependencies import get_sdk_instance
+from atriumdb_dashboard.api.dependencies import get_meta_sdk
 from atriumdb_dashboard.queries import query_measure_total_hours
 
 router = APIRouter()
@@ -34,11 +34,20 @@ router = APIRouter()
 
 
 @router.get("/hours")
-async def get_measure_total_hours(
-        atriumdb_sdk: AtriumSDK = Depends(get_sdk_instance)):
+def get_measure_total_hours(
+        atriumdb_sdk: AtriumSDK = Depends(get_meta_sdk)):
     """Return per-measure data-coverage hours across all devices.
 
-    :param atriumdb_sdk: AtriumSDK instance injected by ``get_sdk_instance``.
+
+    Declared ``def`` rather than ``async def`` deliberately: every resolver below
+    is synchronous and blocking, with nothing awaitable anywhere, so an
+    ``async def`` handler would run the whole request on the event loop and stop
+    the process serving anything else — ``/health`` included — for its duration.
+    A plain ``def`` makes FastAPI run it in a threadpool instead. See
+    :data:`~atriumdb_dashboard.pipeline.data_sdk_lock` for what that
+    concurrency then requires.
+
+    :param atriumdb_sdk: AtriumSDK instance injected by ``get_meta_sdk``.
     :return: List of per-measure dicts as documented on
         :func:`~atriumdb_dashboard.queries.query_measure_total_hours`.
     """

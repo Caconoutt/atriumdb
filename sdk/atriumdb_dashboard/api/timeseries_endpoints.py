@@ -17,10 +17,10 @@
 
 """FastAPI router exposing the dashboard's cohort time-series endpoint.
 
-Takes its SDK from :mod:`atriumdb_dashboard.api.dependencies`, shared with every
-other dashboard router, so the package stays self-contained (nothing is borrowed
-from the test package) and a single ``app.dependency_overrides`` entry swaps the
-SDK for all routers at once.
+Takes the API-mode SDK from
+:func:`~atriumdb_dashboard.api.dependencies.get_data_sdk`, and uses it for
+everything — the measure and patient lookups as well as the block reads. One SDK
+per endpoint is the rule; see that module for why.
 
 Deliberately a separate endpoint from ``POST /cohorts/statistics`` rather than a
 ``vizType`` branch on it: this one requires ``interval_ns`` (meaningless for a
@@ -34,7 +34,7 @@ share is internal, and lives in :mod:`atriumdb_dashboard.pipeline`.
 from fastapi import APIRouter, Depends, Header, HTTPException
 
 from atriumdb import AtriumSDK
-from atriumdb_dashboard.api.dependencies import get_sdk_instance
+from atriumdb_dashboard.api.dependencies import get_data_sdk
 from atriumdb_dashboard.schemas import TimeSeriesRequest, TimeSeriesResponse
 from atriumdb_dashboard.timeseries_resolver import compute_cohort_timeseries
 
@@ -42,22 +42,31 @@ router = APIRouter()
 
 
 @router.post("/timeseries", response_model=TimeSeriesResponse)
-async def post_cohort_timeseries(
+def post_cohort_timeseries(
     request: TimeSeriesRequest,
     x_request_id: str | None = Header(default=None),
-    sdk: AtriumSDK = Depends(get_sdk_instance),
+    sdk: AtriumSDK = Depends(get_data_sdk),
 ):
     """Compute per-cohort per-interval per-patient signal means over a window.
 
     Delegates to
     :func:`~atriumdb_dashboard.timeseries_resolver.compute_cohort_timeseries`,
     which runs in-process against the direct-DB SDK instance injected by
-    ``get_sdk_instance``.
+    ``get_data_sdk``.
 
     Header handling mirrors ``post_cohort_statistics`` — checked in the body for
     a 400 rather than declared into the signature for a 422 — because this is
     that endpoint's sibling and the dashboard already handles that contract for
     ``/cohorts/statistics``.
+
+
+    Declared ``def`` rather than ``async def`` deliberately: every resolver below
+    is synchronous and blocking, with nothing awaitable anywhere, so an
+    ``async def`` handler would run the whole request on the event loop and stop
+    the process serving anything else — ``/health`` included — for its duration.
+    A plain ``def`` makes FastAPI run it in a threadpool instead. See
+    :data:`~atriumdb_dashboard.pipeline.data_sdk_lock` for what that
+    concurrency then requires.
 
     :param request: Parsed request body: the resolved cohorts, the measure
         identifier, the observation window, the interval width, and the
@@ -66,7 +75,7 @@ async def post_cohort_timeseries(
         and an ``"all_time"`` window, each as a 422.
     :param x_request_id: ``X-Request-ID`` header, prefixed onto every log and
         exclusion record for this request.
-    :param sdk: AtriumSDK instance injected by ``get_sdk_instance``.
+    :param sdk: AtriumSDK instance injected by ``get_data_sdk``.
     :return: :class:`~atriumdb_dashboard.schemas.TimeSeriesResponse` with one
         ``CohortTimeSeries`` per input cohort.
     :raises HTTPException: 400 if ``X-Request-ID`` is missing or empty; 422 if

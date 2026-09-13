@@ -17,10 +17,10 @@
 
 """FastAPI router exposing ``POST /cohorts``.
 
-Takes its SDK from :mod:`atriumdb_dashboard.api.dependencies`, shared with every
-other dashboard router, so the package stays self-contained (nothing is borrowed
-from the test package) and a single ``app.dependency_overrides`` entry swaps the
-SDK for all routers at once.
+Takes the direct-DB SDK from
+:func:`~atriumdb_dashboard.api.dependencies.get_meta_sdk`: cohort resolution runs
+the encounter/bed/unit join and ``select_all_patients_in_list`` in raw SQL, which
+needs ``sdk.sql_handler`` and so cannot run in api mode.
 
 Callers wire the router up with
 :func:`~atriumdb_dashboard.api.app.mount_dashboard`.
@@ -29,7 +29,7 @@ Callers wire the router up with
 from fastapi import APIRouter, Depends, Header, HTTPException
 
 from atriumdb import AtriumSDK
-from atriumdb_dashboard.api.dependencies import get_sdk_instance
+from atriumdb_dashboard.api.dependencies import get_meta_sdk
 from atriumdb_dashboard.cohort_resolver import resolve_cohort
 from atriumdb_dashboard.locations import UnknownLocationError
 from atriumdb_dashboard.schemas import CohortDefinitionRequest, MrnCohortResponse
@@ -39,10 +39,10 @@ router = APIRouter()
 
 
 @router.post("", response_model=MrnCohortResponse)
-async def post_cohorts(
+def post_cohorts(
     body: CohortDefinitionRequest,
     x_request_id: str = Header(..., min_length=1, pattern=r"\S"),
-    sdk: AtriumSDK = Depends(get_sdk_instance),
+    sdk: AtriumSDK = Depends(get_meta_sdk),
 ) -> MrnCohortResponse:
     """Resolve cohort definitions into validated MRN lists.
 
@@ -50,7 +50,16 @@ async def post_cohorts(
     on ``body.type``. Delegates entirely to
     :func:`~atriumdb_dashboard.cohort_resolver.resolve_cohort`, which runs the
     resolution in-process against the direct-DB SDK instance injected by
-    ``get_sdk_instance``.
+    ``get_meta_sdk``.
+
+
+    Declared ``def`` rather than ``async def`` deliberately: every resolver below
+    is synchronous and blocking, with nothing awaitable anywhere, so an
+    ``async def`` handler would run the whole request on the event loop and stop
+    the process serving anything else — ``/health`` included — for its duration.
+    A plain ``def`` makes FastAPI run it in a threadpool instead. See
+    :data:`~atriumdb_dashboard.pipeline.data_sdk_lock` for what that
+    concurrency then requires.
 
     :param body: Parsed request body containing the cohort type, the shared
         ``admissionDateRange``, and one or more cohort definitions.
@@ -59,7 +68,7 @@ async def post_cohorts(
         all-whitespace header is rejected with a 422 before any query runs —
         the ``\\S`` pattern is what covers the whitespace-only case, which
         ``min_length`` alone lets through.
-    :param sdk: AtriumSDK instance injected by ``get_sdk_instance``.
+    :param sdk: AtriumSDK instance injected by ``get_meta_sdk``.
     :return: :class:`~atriumdb_dashboard.schemas.MrnCohortResponse` with one
         resolved cohort per input cohort.
     :raises HTTPException: 422 if a requested location matches no unit in the
