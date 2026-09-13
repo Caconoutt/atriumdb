@@ -109,10 +109,25 @@ The directory names matter — the dashboard's compose file resolves
 
 Check out the branch carrying the UAT changes in **both** repos:
 
+| Repo | Branch |
+| --- | --- |
+| `atriumdb` (this one) | `uat_connection` |
+| `SickKids_Dashboard` | `s4-zscore` |
+
 ```bash
-cd ~/sickkids/atriumdb && git checkout <branch> && git log --oneline -1
-cd ~/sickkids/SickKids_Dashboard && git checkout <branch> && git log --oneline -1
+cd ~/sickkids/atriumdb && git checkout uat_connection && git log --oneline -1
+cd ~/sickkids/SickKids_Dashboard && git checkout s4-zscore && git log --oneline -1
 ```
+
+> **PS — these two branches are still under code review.** They are what to
+> deploy today, and they will be merged into `main` once review completes. After
+> that merge, `main` carries the same code and these `git checkout` lines can be
+> dropped. If you are reading this after the merge and the branches no longer
+> exist, that is why — use `main`.
+>
+> Until then, pin both repos to the branch rather than to `main`: deploying one
+> from a branch and the other from `main` is the failure mode to avoid, since the
+> compose file and the container it builds change together.
 
 ---
 
