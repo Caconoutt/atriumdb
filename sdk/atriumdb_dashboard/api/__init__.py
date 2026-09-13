@@ -17,9 +17,11 @@
 
 """HTTP surface for the dashboard: the routers and their app wiring.
 
-Every router takes its SDK from the single provider in
-:mod:`atriumdb_dashboard.api.dependencies`, so one
-``app.dependency_overrides[get_sdk_instance]`` entry covers all of them.
+Each router takes its SDK from one of the two providers in
+:mod:`atriumdb_dashboard.api.dependencies` — ``get_meta_sdk`` for the routes that
+run raw SQL, ``get_data_sdk`` for the routes that read waveform blocks. No route
+uses both, and an ``app.dependency_overrides`` entry must name the provider that
+route actually depends on.
 """
 
 from atriumdb_dashboard.api.app import (
@@ -29,7 +31,11 @@ from atriumdb_dashboard.api.app import (
     mount_dashboard,
 )
 from atriumdb_dashboard.api.cohort_endpoints import router as cohort_router
-from atriumdb_dashboard.api.dependencies import get_sdk_instance
+from atriumdb_dashboard.api.dependencies import (
+    get_data_sdk,
+    get_meta_sdk,
+    get_sdk_instance,
+)
 from atriumdb_dashboard.api.measures_endpoints import router as measures_router
 from atriumdb_dashboard.api.statistics_endpoints import router as statistics_router
 from atriumdb_dashboard.api.timeseries_endpoints import router as timeseries_router
@@ -39,6 +45,8 @@ __all__ = [
     "MEASURES_PREFIX",
     "cohort_router",
     "create_dashboard_app",
+    "get_data_sdk",
+    "get_meta_sdk",
     "get_sdk_instance",
     "measures_router",
     "mount_dashboard",

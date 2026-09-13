@@ -87,9 +87,14 @@ def mount_dashboard(
     statistics per interval — so their order relative to each other does not
     matter.
 
-    All routers share one SDK provider,
-    :func:`~atriumdb_dashboard.api.dependencies.get_sdk_instance`, so a single
-    ``app.dependency_overrides`` entry covers every dashboard route.
+    Routers do **not** share one SDK provider. ``/cohorts`` and
+    ``/measures/hours`` depend on
+    :func:`~atriumdb_dashboard.api.dependencies.get_meta_sdk` (direct-DB, for the
+    raw SQL they run); ``/cohorts/statistics`` and ``/cohorts/timeseries`` depend
+    on :func:`~atriumdb_dashboard.api.dependencies.get_data_sdk` (api mode, for
+    the waveform blocks). Each endpoint uses exactly one. Overriding the SDK in a
+    test therefore means overriding the provider that endpoint names, not a
+    single shared entry.
 
     :param app: The FastAPI application to mount onto.
     :param cohort_prefix: URL prefix shared by the cohorts, statistics and

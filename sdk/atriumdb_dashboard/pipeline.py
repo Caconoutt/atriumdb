@@ -41,6 +41,7 @@ What is deliberately *not* here:
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -59,6 +60,34 @@ if TYPE_CHECKING:
     from atriumdb import AtriumSDK
 
 _LOGGER = logging.getLogger(__name__)
+
+#: Serialises use of the API-mode SDK's single websocket.
+#:
+#: ``AtriumSDK._block_websocket_request`` sends a block-id list on
+#: ``self.websock_conn`` and then reads from that same connection until it sees
+#: ``Atriumdb_Done``. There is no lock anywhere in ``atrium_sdk.py``, and the
+#: connection is deliberately held open for the life of the SDK object — which,
+#: coming from ``get_data_sdk``, is process-wide and shared across requests.
+#:
+#: The endpoints run in FastAPI's threadpool, so two requests can reach
+#: :func:`fetch_nan_filled_window` at once. Without this lock they interleave on
+#: one socket: both send, then both consume from the same stream, and one can
+#: return the other's blocks. Nothing raises — the bytes decode cleanly and the
+#: values belong to another patient.
+#:
+#: Lives here rather than in ``api.dependencies`` because this module is its only
+#: user and the dependency must run one way: ``api`` imports ``pipeline``, never
+#: the reverse.
+data_sdk_lock = threading.Lock()
+
+#: Timeout for the block-list request in :func:`fetch_nan_filled_window`.
+#:
+#: No HTTP call in ``atrium_sdk.py`` sets one — a grep for ``timeout`` there
+#: returns nothing — so a UAT server that accepts a connection and then stops
+#: responding would hang a worker thread indefinitely. ``_request`` forwards
+#: ``**kwargs`` to ``requests.request``, so the one call the dashboard makes
+#: itself can be bounded even though the SDK's internal ones cannot.
+_BLOCK_LIST_TIMEOUT_S = 60
 
 
 # ---------------------------------------------------------------------------
@@ -110,18 +139,41 @@ def resolve_patient_ids(sdk: "AtriumSDK", cohort: CohortInput) -> dict[str, int]
     two endpoints key exclusions differently — S2 by MRN, S3 by visit index —
     and folding record construction in here would force one shape on both.
 
-    :param sdk: AtriumSDK instance in direct-DB mode.
+    Uses ``get_mrn_to_patient_id_map`` rather than ``get_patient_id`` per MRN,
+    because the two behave differently in api mode and only the former is
+    correct here. ``get_patient_id`` is ``self._request(...)['id']``, and
+    ``_request`` raises ``ValueError`` on any non-200 — so a single unknown MRN
+    would abort the whole request as a 422, rather than excluding one patient
+    and processing the rest. ``get_mrn_to_patient_id_map`` catches that per MRN
+    and omits it, matching the direct-DB behaviour this function was written
+    against. It is also what ``cohort_resolver`` already uses for the 1A path.
+
+    One consequence to be aware of when reading a response: the SDK's ``except
+    ValueError`` there cannot distinguish "404, no such MRN" from a server fault
+    or an expired token, because the status survives only inside the exception
+    message. A transient API problem therefore looks like a set of unknown MRNs.
+    The caller logs how many were dropped (see ``_resolve_cohort_patients``) so
+    that a suspicious count is diagnosable.
+
+    :param sdk: AtriumSDK instance, direct-DB or api mode.
     :param cohort: The cohort whose patients to resolve.
     :return: Mapping of MRN to patient ID, containing only MRNs that resolved.
         ``len()`` of it is the cohort's distinct patient count.
     """
-    resolved: dict[str, int] = {}
-    for patient in cohort.patients:
-        patient_id = sdk.get_patient_id(mrn=patient.mrn)
-        if patient_id is None:
-            continue
-        resolved[patient.mrn] = patient_id
-    return resolved
+    mrn_list = [patient.mrn for patient in cohort.patients]
+    if not mrn_list:
+        return {}
+
+    resolved = sdk.get_mrn_to_patient_id_map(mrn_list=mrn_list)
+
+    # Normalise to the request's own MRN strings. The SDK keys the map by
+    # ``str(mrn)``, and every caller looks the result up by ``patient.mrn``, so
+    # anything that did not round-trip identically would silently drop a patient.
+    return {
+        patient.mrn: int(resolved[patient.mrn])
+        for patient in cohort.patients
+        if patient.mrn in resolved
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +268,143 @@ def resolve_value_range(
 
 
 # ---------------------------------------------------------------------------
+# Window fetch — the NaN-filled sample grid both endpoints reduce
+# ---------------------------------------------------------------------------
+
+def fetch_nan_filled_window(
+    sdk: "AtriumSDK",
+    measure_id: int,
+    patient_id: int,
+    window_start_ns: int,
+    window_end_ns: int,
+) -> np.ndarray:
+    """Return the window as a regular grid, gaps filled with NaN, in either mode.
+
+    Both endpoints need one slot per sample the measure's frequency implies over
+    the window, NaN wherever no sample exists — for a 1 Hz measure over an hour,
+    a 3600-element array however much data is actually there. Availability is the
+    non-NaN fraction of it, and S3's buckets are fixed slices of it.
+
+    **Why this exists.** ``sdk.get_data(..., return_nan_filled=True)`` produces
+    that grid in direct-DB mode but is silently ignored in api mode: the api
+    branch of ``get_data`` calls ``_get_data_api`` without forwarding
+    ``return_nan_filled``, so it returns an unfilled 3-tuple where the caller
+    unpacks two. The immediate symptom is ``ValueError: too many values to
+    unpack``; the dangerous one is that, unpacked successfully, availability
+    would compute as 1.0 for every window and the threshold would stop excluding
+    anything.
+
+    **Why it is not rebuilt in numpy.** NaN-filling is not post-processing on
+    ``(times, values)``. It happens inside the C library, in
+    ``Block.decode_blocks(..., return_nan_gap=True)``, which needs the block
+    headers and the *raw, pre-analog-scaling* value buffer because it applies
+    each block's own scale factors while scattering samples onto the grid. It
+    also derives ``period_ns`` from the headers itself. Reconstructing that from
+    a normal ``get_data`` return would mean re-deriving the scaling and rounding
+    rules, and drifting from the direct-DB path.
+
+    So the api path here restates ``AtriumSDK._get_data_api`` with the three
+    arguments it drops — ``return_nan_gap``, ``start_time_n``, ``end_time_n`` —
+    forwarded to the same ``decode_blocks`` call the SDK itself makes. Results
+    are therefore identical to the direct-DB path rather than merely equivalent.
+
+    Restating those few lines keeps ``sdk/atriumdb/`` byte-identical to upstream,
+    which is the same trade ``cohort_resolver._post_cohorts_remote`` makes. The
+    upstream functions shadowed here are ``AtriumSDK._get_data_api`` and the
+    zero-block branch of ``AtriumSDK.get_data``; grep for those names when
+    upgrading the SDK.
+
+    :param sdk: AtriumSDK instance, direct-DB or api mode.
+    :param measure_id: The measure to read.
+    :param patient_id: The patient to read for.
+    :param window_start_ns: Window start, epoch nanoseconds, inclusive.
+    :param window_end_ns: Window end, epoch nanoseconds, exclusive.
+    :return: 1D float64 array spanning the window at the measure's nominal
+        period, NaN where no sample exists. Never ``None``; an empty window
+        yields an all-NaN array of the expected length.
+    """
+    if getattr(sdk, "mode", None) != "api":
+        _, values = sdk.get_data(
+            measure_id=measure_id,
+            patient_id=patient_id,
+            start_time_n=window_start_ns,
+            end_time_n=window_end_ns,
+            return_nan_filled=True,
+        )
+        if values is None:
+            return _all_nan_window(sdk, measure_id, window_start_ns, window_end_ns)
+        return values
+
+    params = {
+        "start_time": window_start_ns,
+        "end_time": window_end_ns,
+        "measure_id": measure_id,
+        "device_id": None,
+        "patient_id": patient_id,
+        "mrn": None,
+    }
+
+    # One lock across the block-list request and the websocket transfer, not
+    # just the transfer: the SDK connects the websocket lazily inside
+    # ``_block_websocket_request``, so a narrower lock would still let two
+    # threads race to create it. See :data:`data_sdk_lock` for why the shared
+    # connection cannot be used concurrently at all.
+    with data_sdk_lock:
+        block_info_list = sdk._request(
+            "GET", "sdk/blocks", params=params, timeout=_BLOCK_LIST_TIMEOUT_S
+        )
+
+        if len(block_info_list) == 0:
+            # ``decode_blocks`` cannot be handed zero blocks — it reads
+            # ``headers[0]`` to derive the period. Mirrors the zero-block branch
+            # of ``AtriumSDK.get_data``.
+            return _all_nan_window(sdk, measure_id, window_start_ns, window_end_ns)
+
+        num_bytes_list = [row["num_bytes"] for row in block_info_list]
+        encoded_bytes = sdk._block_websocket_request(block_info_list)
+
+        _, values = sdk.block.decode_blocks(
+            encoded_bytes,
+            num_bytes_list,
+            analog=True,
+            time_type=1,
+            return_nan_gap=True,
+            start_time_n=window_start_ns,
+            end_time_n=window_end_ns,
+        )
+
+    return values
+
+
+def _all_nan_window(
+    sdk: "AtriumSDK",
+    measure_id: int,
+    window_start_ns: int,
+    window_end_ns: int,
+) -> np.ndarray:
+    """Return an all-NaN grid of the length the window implies.
+
+    The "no data at all" case, which cannot go through ``decode_blocks``. The
+    arithmetic mirrors the SDK's own zero-block branch so that an empty window
+    and a sparse one produce grids of the same length, which is what lets the
+    caller treat availability as a pure non-NaN fraction either way.
+    """
+    info = sdk.get_measure_info(measure_id)
+    period_ns = (info or {}).get("period_ns")
+    if not period_ns:
+        freq_nhz = (info or {}).get("freq_nhz")
+        if not freq_nhz:
+            raise ValueError(
+                f"Measure {measure_id} has neither period_ns nor a non-zero freq_nhz, "
+                f"so an empty window has no length."
+            )
+        period_ns = (10 ** 18) / freq_nhz
+
+    expected_num_values = int(round((window_end_ns - window_start_ns) / period_ns))
+    return np.full(max(0, expected_num_values), np.nan, dtype=np.float64)
+
+
+# ---------------------------------------------------------------------------
 # Value-range masking
 # ---------------------------------------------------------------------------
 
@@ -284,8 +473,32 @@ def fetch_demographics(
     Demographics are best-effort: a dataset that does not record gender or dob
     yields ``None``, which the dashboard renders as an em-dash. Missing values
     never exclude an entry.
+
+    This is the per-patient results-table lookup, **not** the demographic cohort
+    filter — that one is Priority 1B in ``cohort_resolver`` and runs on raw SQL
+    against the metadata store.
+
+    Only ``gender`` and ``dob`` are read. Over the API this record also carries
+    ``mrn`` and the patient's name fields; nothing here reads or forwards them,
+    and nothing logs the record itself. Keep it that way — a debug line dumping
+    ``info`` would put patient names into the container log, which the direct-DB
+    path never did.
     """
-    info = sdk.get_patient_info(patient_id=patient_id, time=admission_ns)
+    try:
+        info = sdk.get_patient_info(patient_id=patient_id, time=admission_ns)
+    except ValueError as exc:
+        # In api mode a patient the server does not know 404s, and ``_request``
+        # turns any non-200 into a ValueError rather than returning None. This
+        # function is best-effort by contract — demographics only decorate a
+        # results-table row and never decide inclusion — so a lookup failure
+        # must degrade to "unknown", exactly as a dataset without the fields
+        # does, rather than failing the whole request.
+        _LOGGER.debug(
+            "[%s] mrn=%s: get_patient_info failed at admission_ns=%d (%s).",
+            request_id, mrn, admission_ns, exc,
+        )
+        return None, None
+
     if info is None:
         _LOGGER.debug(
             "[%s] mrn=%s: get_patient_info returned no record at admission_ns=%d.",

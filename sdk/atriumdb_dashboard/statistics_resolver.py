@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from atriumdb_dashboard.pipeline import (
+    fetch_nan_filled_window,
     compute_observation_window,
     fetch_demographics,
     resolve_measure_id,
@@ -195,6 +196,13 @@ def _process_cohort(
             if interval_arr is None or len(interval_arr) == 0:
                 covered_ns = 0
             else:
+                # In api mode this comes back as parsed JSON — a list of
+                # [start, end] pairs — where the direct-DB path returns an
+                # ndarray. The 2D slicing below needs the array form, and
+                # asarray is a no-op view when it already is one. Must stay
+                # after the length check: np.asarray([]) has shape (0,), not
+                # (0, 2), so slicing an empty result would raise.
+                interval_arr = np.asarray(interval_arr, dtype=np.int64)
                 covered_ns = int(np.sum(interval_arr[:, 1] - interval_arr[:, 0]))
 
             observation_window_ns = window_end_ns - window_start_ns
@@ -326,14 +334,13 @@ def _extract_patient_mean(
         the entry.
     """
     if value_range is None:
-        _, _, values = sdk.get_data(
-            measure_id=measure_id,
-            patient_id=patient_id,
-            start_time_n=window_start_ns,
-            end_time_n=window_end_ns,
+        # Unbounded: only NaN-filtering applies, so the grid's gaps and a plain
+        # fetch's absent samples amount to the same set of usable values. Going
+        # through the same helper as the bounded branch keeps one code path for
+        # both SDK modes.
+        values = fetch_nan_filled_window(
+            sdk, measure_id, patient_id, window_start_ns, window_end_ns
         )
-        if values is None:
-            values = np.array([])
         values = values[usable_mask(values, None)]
         if len(values) == 0:
             return None, ExclusionReason.NO_USABLE_VALUES, None
@@ -345,12 +352,8 @@ def _extract_patient_mean(
     # of that array is the post-filter availability, which is why the check has
     # to be redone here — get_interval_array is value-blind and can only gate on
     # how much data exists, not on how much of it falls inside the bounds.
-    _, values = sdk.get_data(
-        measure_id=measure_id,
-        patient_id=patient_id,
-        start_time_n=window_start_ns,
-        end_time_n=window_end_ns,
-        return_nan_filled=True,
+    values = fetch_nan_filled_window(
+        sdk, measure_id, patient_id, window_start_ns, window_end_ns
     )
     if values is None or len(values) == 0:
         return None, ExclusionReason.NO_USABLE_VALUES, None

@@ -26,6 +26,8 @@ not imported here, so that using the resolver does not require FastAPI.
 """
 
 from atriumdb_dashboard.cohort_resolver import resolve_cohort, resolve_cohorts_local
+from atriumdb_dashboard.config import ConfigError, DashboardConfig, load_config
+from atriumdb_dashboard.pipeline import data_sdk_lock, fetch_nan_filled_window
 from atriumdb_dashboard.statistics_resolver import compute_aggregate_statistics
 from atriumdb_dashboard.timeseries_resolver import compute_cohort_timeseries
 from atriumdb_dashboard.locations import (
@@ -90,7 +92,11 @@ __all__ = [
     "VisitMean",
     "compute_aggregate_statistics",
     "compute_cohort_timeseries",
+    "data_sdk_lock",
+    "fetch_nan_filled_window",
     "CohortDefinitionRequest",
+    "ConfigError",
+    "DashboardConfig",
     "DemographicCohort",
     "UnknownLocationError",
     "MrnCohort",
@@ -102,6 +108,7 @@ __all__ = [
     "query_patient_encounters",
     "resolve_cohort",
     "resolve_cohorts_local",
+    "load_config",
     "select_patient_encounters",
     "validate_location_codes",
     "query_measure_total_hours",

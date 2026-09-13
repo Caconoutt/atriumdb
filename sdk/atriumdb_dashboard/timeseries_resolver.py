@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from atriumdb_dashboard.pipeline import (
+    fetch_nan_filled_window,
     compute_observation_window,
     fetch_demographics,
     resolve_measure_id,
@@ -367,11 +368,12 @@ def _fetch_window_values(
 ) -> np.ndarray:
     """Fetch the whole window as one regular, NaN-filled sample grid.
 
-    ``return_nan_filled=True`` returns a **2-tuple** ``(headers, values)`` rather
-    than the usual 3-tuple, where ``values`` spans the full window at the
-    measure's nominal period with gaps filled as NaN. Two things follow, and
-    together they are why this endpoint makes one SDK data call per entry rather
-    than one per bucket:
+:func:`~atriumdb_dashboard.pipeline.fetch_nan_filled_window` returns a grid
+    spanning the full window at the measure's nominal period, with gaps filled as
+    NaN, in either SDK mode — ``get_data``'s own ``return_nan_filled`` is
+    silently ignored over the API, which is why this does not call it directly.
+    Two things follow, and together they are why this endpoint makes one data
+    call per entry rather than one per bucket:
 
     * The grid is regular, so a sample's interval is pure integer arithmetic on
       its index — no per-sample timestamp lookup, and no timestamps are returned
@@ -383,19 +385,15 @@ def _fetch_window_values(
 
     :return: 1D float64 array, empty when the SDK returned nothing.
     """
-    _, values = sdk.get_data(
-        measure_id=measure_id,
-        patient_id=patient_id,
-        start_time_n=window_start_ns,
-        end_time_n=window_end_ns,
-        return_nan_filled=True,
+    values = fetch_nan_filled_window(
+        sdk, measure_id, patient_id, window_start_ns, window_end_ns
     )
     # Guarded rather than relying on lazy %s formatting: lazy formatting defers
     # the % operation, not the evaluation of the arguments, so array2string would
     # build its ~1 MB string on every entry even with DEBUG off.
     if _LOGGER.isEnabledFor(logging.DEBUG):
         _LOGGER.debug(
-            "[%s] get_data measure_id=%s patient_id=%s window=[%s, %s] "
+            "[%s] window fetch measure_id=%s patient_id=%s window=[%s, %s] "
             "n_values=%s values=%s",
             request_id, measure_id, patient_id, window_start_ns, window_end_ns,
             "None" if values is None else len(values),
