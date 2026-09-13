@@ -5,6 +5,17 @@
 # The folder must contain meta/index.db and a tsc/ subdirectory.
 HOST_DATASET_PATH="/absolute/path/to/your/dataset"
 
+# Credentials (MariaDB, Auth0) are NOT set here. This script bind-mounts this
+# directory (sdk/) at /sdk, so a .env anywhere under it is visible to the
+# container and config.py loads it on startup:
+#
+#     cp atriumdb_dashboard/.env.example atriumdb_dashboard/.env
+#
+# That is the whole setup. config.py also accepts sdk/.env, but the path above
+# is preferred: it sits beside the template, and it is found relative to the
+# package rather than to whatever directory the process was started from.
+# Leave the file absent for a plain local SQLite run.
+
 # ---------------------------------------------------------------------------
 # Nothing below this line should need editing.
 # ---------------------------------------------------------------------------

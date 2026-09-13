@@ -9,8 +9,22 @@ tests/atriumdb_dashboard/measure_hours_report.log
 
 # Host virtualenv — macOS binaries, useless and ~15MB inside a Linux image.
 .venv/
-# Local dev config; the container gets its environment from compose.
-.env
+# Secrets and local dev config. The container gets its environment at RUN time
+# (--env-file, or compose env_file), never from a file baked into a layer.
+#
+# The **/ prefix is load-bearing. Unlike .gitignore, a bare pattern here matches
+# ONLY the build-context root -- the context is sdk/, so a plain ".env" would
+# leave sdk/atriumdb_dashboard/.env to be picked up by "COPY . ." and baked in.
+**/.env
+**/.env.*
+**/.env-*
+# ...but the committed template carries no values and must ship.
+!**/.env.example
+
+# NOTE: a per-Dockerfile ignore file is honoured only by BuildKit. Under the
+# legacy builder (DOCKER_BUILDKIT=0) only a .dockerignore at the context root
+# (sdk/) is read, and these patterns would not apply. That file is outside this
+# package and so outside this module's scope; see docs/s4_uat_dual_sdk_plan.md.
 .DS_Store
 docs/
 

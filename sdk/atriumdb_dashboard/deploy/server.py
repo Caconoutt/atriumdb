@@ -30,9 +30,15 @@ The upstream routes ship alongside the dashboard ones deliberately — the
 deployment check verifies ``/measures/`` (upstream) as well as
 ``/measures/hours``, ``/cohorts`` and ``/cohorts/statistics`` (dashboard).
 
-The SDK comes from :func:`~atriumdb_dashboard.api.dependencies.get_sdk_instance`,
-which reads ``ATRIUMDB_DATASET_LOCATION``. The upstream routes are pointed at it
-too, via ``dependency_overrides`` — see below.
+The dashboard routes take their SDK from one of two providers in
+:mod:`atriumdb_dashboard.api.dependencies` — ``get_meta_sdk`` for the direct-DB
+routes, ``get_data_sdk`` for the API-backed ones. The upstream routes are pointed
+at ``get_meta_sdk`` via ``dependency_overrides``, since they are metadata routes
+— see below.
+
+Configuration is validated at import by :func:`check_configuration`, so a missing
+variable stops the container with a message naming it rather than 500-ing on the
+first request that needs it.
 
 Logging is configured here, at import, by :func:`configure_logging` — see its
 docstring for the two environment variables involved.
@@ -46,7 +52,8 @@ from tests.mock_api.app import app as app
 from tests.mock_api.sdk_dependency import get_sdk_instance as _upstream_get_sdk
 
 from atriumdb_dashboard.api.app import mount_dashboard
-from atriumdb_dashboard.api.dependencies import get_sdk_instance
+from atriumdb_dashboard.api.dependencies import get_config, get_data_sdk, get_meta_sdk
+from atriumdb_dashboard.config import ConfigError, describe
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -178,7 +185,34 @@ def configure_logging() -> None:
     )
 
 
+def check_configuration() -> None:
+    """Validate configuration at import, and log what this container points at.
+
+    Failing here rather than on the first request is the whole point: a missing
+    variable becomes a container that refuses to start with a message naming it,
+    instead of one that serves ``/health`` happily and 500s on real traffic.
+
+    Secrets are never logged — :func:`~atriumdb_dashboard.config.describe`
+    renders the configuration with values redacted.
+    """
+    try:
+        config = get_config()
+    except ConfigError as exc:
+        _LOGGER.error("Dashboard configuration is invalid: %s", exc)
+        raise
+
+    _LOGGER.info("Dashboard configuration: %s", describe(config))
+
+    if not config.data_configured:
+        _LOGGER.warning(
+            "No ATRIUMDB_API_URL configured: /cohorts/statistics and "
+            "/cohorts/timeseries will return 503. /cohorts and /measures/hours "
+            "are unaffected."
+        )
+
+
 configure_logging()
+check_configuration()
 
 mount_dashboard(app)
 
@@ -187,18 +221,67 @@ mount_dashboard(app)
 # upstream route. Overriding it here rather than editing ``tests/mock_api`` is what
 # keeps that package byte-identical to upstream, and one entry covers every
 # upstream route since they all depend on the same function object.
-app.dependency_overrides[_upstream_get_sdk] = get_sdk_instance
+#
+# Pointed at the metadata SDK: the upstream routes serve measures, patients and
+# blocks out of our own dataset, which is a direct-DB question.
+app.dependency_overrides[_upstream_get_sdk] = get_meta_sdk
 
 
 @app.get("/health")
 async def health():
     """Liveness probe for container orchestration.
 
-    Deliberately does not touch the SDK: it answers whether the process is
+    Deliberately does not touch either SDK: it answers whether the process is
     serving, which is what a healthcheck should gate ``depends_on`` upon.
-    Dataset problems surface as errors on the routes that actually read it.
+    Backend problems surface on ``/health/ready`` and on the routes that read.
+
+    Left ``async`` — unlike the dashboard endpoints — precisely because it does
+    no blocking work. Running it on the event loop costs nothing and keeps it
+    answerable while every threadpool worker is busy with a long request, which
+    is the situation a liveness probe most needs to survive.
     """
     return {"status": "ok"}
 
 
-__all__ = ["app"]
+@app.get("/health/ready")
+def readiness():
+    """Report each backend's reachability independently.
+
+    Two independent backends now stand behind the dashboard, and they fail
+    independently: "cohorts work but statistics 500" is otherwise diagnosable
+    only from the outside. This reports them separately so the failing half is
+    named.
+
+    ``def`` rather than ``async def``: both checks below are blocking.
+
+    :return: ``{"metadata": ..., "data_api": ...}``, each ``"ok"`` or a short
+        reason. Always HTTP 200 — this is a diagnostic, and an orchestrator that
+        restarts on a transient API outage would make things worse, not better.
+    """
+    status = {}
+
+    try:
+        with get_meta_sdk().sql_handler.connection(begin=False) as (_, cursor):
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+        status["metadata"] = "ok"
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must report, not raise
+        status["metadata"] = f"unavailable: {type(exc).__name__}"
+        _LOGGER.warning("Readiness: metadata backend unavailable: %s", exc)
+
+    if get_config().data is None:
+        status["data_api"] = "not configured"
+    else:
+        try:
+            # A token mint alone would prove Auth0 but not the API; one cheap
+            # metadata call proves auth, routing and the SDK's api mode together.
+            get_data_sdk().get_all_measures()
+            status["data_api"] = "ok"
+        except Exception as exc:  # noqa: BLE001 - same
+            status["data_api"] = f"unavailable: {type(exc).__name__}"
+            _LOGGER.warning("Readiness: data API unavailable: %s", exc)
+
+    return status
+
+
+__all__ = ["app", "check_configuration", "configure_logging"]
