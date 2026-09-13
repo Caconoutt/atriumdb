@@ -26,6 +26,83 @@ that opens `meta/index.db` or the `tsc/` files.
 
 ---
 
+## 0. The deployment, start to finish
+
+Every command runs from `~/sickkids/SickKids_Dashboard` unless stated otherwise.
+Each step links to the section that explains it; the detail matters most the
+first time and on the steps that touch credentials.
+
+### First, decide which backends this deployment uses
+
+The container opens **two** SDK instances now, and they are configured
+separately. Which ones you need decides which variables you set.
+
+| | metadata SDK (`get_meta_sdk`) | data SDK (`get_data_sdk`) |
+| --- | --- | --- |
+| serves | `POST /cohorts`, `GET /measures/hours` | `POST /cohorts/statistics`, `POST /cohorts/timeseries` |
+| reads | a SQLite dataset, or MariaDB | the AtriumDB API over Auth0 |
+| configure with | `ATRIUMDB_METADATA_CONNECTION_TYPE` + either `ATRIUMDB_DATASET_LOCATION` or the `ATRIUMDB_MARIA_*` set | `ATRIUMDB_API_URL` + the `AUTH0_*` set |
+
+Two shapes in practice:
+
+* **Local / self-contained** — SQLite dataset, no API. Leave `ATRIUMDB_API_URL`
+  unset; statistics and time-series return **503** and the other two routes work
+  normally. This is the pre-UAT deployment, unchanged.
+* **UAT** — MariaDB for metadata, the AtriumDB API for waveforms. Both sets of
+  variables required.
+
+Mixing is allowed (SQLite metadata + a remote API, say), because each endpoint
+uses exactly one SDK and neither knows about the other.
+
+### The steps
+
+| # | Step | Where | Section |
+| --- | --- | --- | --- |
+| 1 | Prepare the dataset — seed MRNs, beds, encounters | your own machine | [Step 0](#step-0--prepare-the-dataset-locally-before-copying-it) |
+| 2 | Copy the dataset to the server | your machine → server | [Step 1](#step-1--put-the-dataset-on-the-server) |
+| 3 | Clone `atriumdb` and `SickKids_Dashboard` as siblings | server | [Step 2](#step-2--clone-both-repos-as-siblings) |
+| 4 | **Obtain credentials** — read-only MariaDB account, Auth0 M2M client, API URL | — | [Step 2.5](#step-25--obtain-and-place-credentials-uat-only) |
+| 5 | **Place credentials** so the container can read them | server | [Step 2.5](#step-25--obtain-and-place-credentials-uat-only) |
+| 6 | Configure the dashboard's `.env` | server | [Step 3](#step-3--configure-the-dashboards-env) |
+| 7 | `docker compose config` — check substitution before building | server | [Step 4](#step-4--build) |
+| 8 | `docker compose build` | server | [Step 4](#step-4--build) |
+| 9 | `docker compose up -d atriumdb-api` — this service alone | server | [Step 5](#step-5--start-this-service-alone-and-prove-it-before-the-rest) |
+| 10 | Check the startup log names the right backends | server | [Step 5](#step-5--start-this-service-alone-and-prove-it-before-the-rest) |
+| 11 | `GET /health/ready` — both backends reachable | server | [Step 5](#step-5--start-this-service-alone-and-prove-it-before-the-rest) |
+| 12 | Probe the five routes | server | [§5](#5-verifying-the-routes) |
+| 13 | `docker compose up -d` — start the other three | server | [Step 6](#step-6--start-the-rest) |
+| 14 | One cohort query end to end, in a browser | browser | [Step 7](#step-7--end-to-end-check) |
+
+Condensed, once the credentials are in place:
+
+```bash
+cd ~/sickkids/SickKids_Dashboard
+docker compose config                       # 7  substitution sane?
+docker compose build                        # 8  ~minutes on a cold cache
+docker compose up -d atriumdb-api           # 9  this service alone
+docker compose logs -f atriumdb-api         # 10 Ctrl-C to detach
+docker compose exec atriumdb-api python -c \
+  "import urllib.request;print(urllib.request.urlopen('http://localhost:8000/health/ready').read())"
+                                            # 11 {"metadata":"ok","data_api":"ok"}
+docker compose up -d                        # 13 the other three
+docker compose ps                           # all four Up
+```
+
+Steps 9–12 exist to fail fast. A wrong dataset path, an unreachable MariaDB or a
+rejected Auth0 client shows up there in seconds, rather than as an opaque 502
+through two proxies once everything is running.
+
+### What "done" looks like
+
+* `docker compose ps` — all four `Up`, `postgres` and `backend` `(healthy)`.
+* `GET /health/ready` — `{"metadata": "ok", "data_api": "ok"}`, or
+  `{"metadata": "ok", "data_api": "not configured"}` for a local deployment.
+* The startup log names the backends it opened, with no password in sight:
+  `Dashboard configuration: metadata: mariadb ro@db.host:3306/atrium | data api: https://host/api/v1 (auth0 client_credentials)`
+* One cohort query in the browser returns statistics.
+
+---
+
 ## 1. What this repo contributes
 
 Compose builds `sdk/atriumdb_dashboard/docker/Dockerfile` from the sibling checkout:
@@ -37,9 +114,37 @@ Compose builds `sdk/atriumdb_dashboard/docker/Dockerfile` from the sibling check
       dockerfile: atriumdb_dashboard/docker/Dockerfile
     environment:
       ATRIUMDB_DATASET_LOCATION: /data/atriumdb
+    env_file:
+      - ./atriumdb-api.env             # ← UAT only; see step 2.5
     volumes:
       - ${ATRIUMDB_DATASET_PATH}:/data/atriumdb:ro
 ```
+
+The `env_file:` line is the UAT addition — it carries the MariaDB and Auth0
+settings. Omit it for a local SQLite deployment, where
+`ATRIUMDB_DATASET_LOCATION` alone is enough.
+
+### Configuration environment variables
+
+`config.py` is the only module that reads the environment, and
+`deploy/server.py` validates the whole set **at import**. A missing or malformed
+value therefore stops the container at startup with a message naming the
+variable, rather than surfacing as a 500 on the first real request.
+
+| Variable | Required when | Effect |
+|---|---|---|
+| `ATRIUMDB_METADATA_CONNECTION_TYPE` | always (defaults to `sqlite`) | `sqlite` or `mariadb`. The default preserves the pre-UAT deployment exactly. |
+| `ATRIUMDB_DATASET_LOCATION` | always | The dataset directory in SQLite mode. **Still required in `mariadb` mode**, where it is passed as `tsc_file_location` purely to satisfy the SDK constructor — it builds a file handler before it looks at the connection type. Nothing reads a `.tsc` file through the metadata SDK, so any existing directory will do. |
+| `ATRIUMDB_MARIA_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_DATABASE` | `mariadb` mode | The metadata database. Ask for a **read-only** account — see step 2.5. `_PORT` defaults to 3306. |
+| `ATRIUMDB_API_URL` | statistics / time-series | Base URL of the AtriumDB API, **including any version segment**. The SDK appends bare endpoint names, so a versioned API must carry the prefix here or every request 404s. Leave unset to disable those two routes with a 503. |
+| `AUTH0_TENANT` / `_CLIENT_ID` / `_CLIENT_SECRET` / `_AUDIENCE` | when `ATRIUMDB_API_URL` is set | Machine-to-machine credentials. `AUTH0_AUDIENCE` is an Auth0 identifier and is **not** the same value as `ATRIUMDB_API_URL`, though they often look similar — a mismatch is the usual cause of a 401. |
+| `AUTH0_GRANT_TYPE` | optional | Defaults to `client_credentials`, the only flow supported. |
+| `ATRIUMDB_API_TOKEN` | optional | A pre-minted token, which skips the Auth0 round trip. For iterating, not for deployment. |
+
+> **Setting `ATRIUMDB_API_URL` without the `AUTH0_*` set is refused at startup**,
+> naming the ones that are missing. Half-configured is treated as a mistake
+> rather than a degraded mode — the alternative is a container that starts
+> cleanly and 503s every statistics request.
 
 > **The `dockerfile:` key is required.** The Dockerfile lives inside the
 > dashboard package rather than at the build-context root, so a compose file
@@ -98,6 +203,13 @@ Two constants worth keeping in mind:
 * The user running compose must be in the `docker` group, or every command needs
   `sudo`. Pick one and stay consistent — images built under `sudo` are not
   visible to a rootless daemon and vice versa.
+* **For UAT only**, outbound network from the container to:
+  * the Auth0 tenant over `https://` — token minting;
+  * the AtriumDB API over **both `https://` and `wss://`** — metadata goes over
+    REST, but block transfers use the websocket, so a firewall that permits only
+    HTTPS gives a container that authenticates and reads measures happily and
+    then hangs on the first statistics request;
+  * the MariaDB host on its port (3306 by default).
 
 ## 3. Deployment order
 
@@ -213,6 +325,76 @@ cd ~/sickkids/atriumdb && git checkout deploy && git log --oneline -1
 cd ~/sickkids/SickKids_Dashboard && git checkout <branch> && git log --oneline -1
 ```
 
+### Step 2.5 — obtain and place credentials (UAT only)
+
+Skip this entirely for a local SQLite deployment.
+
+**What to ask for.**
+
+| From | What | Notes |
+|---|---|---|
+| whoever owns the MariaDB | host, port, database, username, password | Ask explicitly for a **read-only** account. Nothing the dashboard does writes, and read-only turns a mistake — an accidental `auto_upgrade=True`, say — into a permissions error instead of a schema migration on a shared server. |
+| whoever owns the API | the Auth0 client id, client secret, audience and tenant, plus the **API base URL** | The base URL is not derivable from the token: an Auth0 token carries `iss` and `aud`, neither of which has to be the API's address. Ask for it rather than guessing. |
+
+The MariaDB account needs `SELECT` on: `settings`, `measure`, `block_index`,
+`encounter`, `bed`, `unit`, `patient`, `patient_history`. `settings` is easy to
+miss — the SDK constructor reads it before serving anything.
+
+**Where to put them.** They belong in a file on the server that compose reads and
+injects, *outside* the build context so no image layer can contain them:
+
+```bash
+cd ~/sickkids/SickKids_Dashboard
+cp ../atriumdb/sdk/atriumdb_dashboard/.env.example ./atriumdb-api.env
+$EDITOR ./atriumdb-api.env
+chmod 600 ./atriumdb-api.env
+```
+
+Then reference it from the `atriumdb-api` service, as shown in §1:
+
+```yaml
+    env_file:
+      - ./atriumdb-api.env
+```
+
+Fill in, at minimum:
+
+```
+ATRIUMDB_METADATA_CONNECTION_TYPE=mariadb
+ATRIUMDB_MARIA_HOST=...
+ATRIUMDB_MARIA_USER=...
+ATRIUMDB_MARIA_PASSWORD=...
+ATRIUMDB_MARIA_DATABASE=...
+
+ATRIUMDB_API_URL=https://host/api/v1
+AUTH0_TENANT=your-tenant.us.auth0.com
+AUTH0_CLIENT_ID=...
+AUTH0_CLIENT_SECRET=...
+AUTH0_AUDIENCE=...
+```
+
+`ATRIUMDB_DATASET_LOCATION` stays set in `docker-compose.yml` — in `mariadb` mode
+it only satisfies the SDK constructor, as §1 explains.
+
+Three rules, none of them optional:
+
+* **Never `-e` on the command line.** `docker run -e PASSWORD=…` puts the value
+  in the host's process list and in shell history. `env_file` keeps it in a file
+  you control the permissions of.
+* **Never inside the build context.** `sdk/` is the build context and the
+  Dockerfile ends in `COPY . .`. A `.env` there would be baked into an image
+  layer, and deleting it later does not remove it from the layer. The
+  `.dockerignore` excludes `**/.env` precisely so a slip is harmless, but keeping
+  the real file outside the context is the actual protection.
+* **If a credential was ever inside an image, rotate it.** Excluding a file from
+  future builds does nothing about images already built.
+
+> A `.env` inside the bind-mounted `sdk/` tree also works — `config.py` looks for
+> one beside the package and in the working directory — and that is the right
+> shape for local development. For a server, `env_file` is better: the secret
+> lives in one file with its own permissions, rather than inside a source tree
+> that gets pulled and rebuilt.
+
 ### Step 3 — configure the dashboard's `.env`
 
 All four services read their configuration from one file, in the dashboard repo:
@@ -223,12 +405,17 @@ cp .env.docker.example .env
 $EDITOR .env
 ```
 
+This is the **dashboard's** configuration. This container's own MariaDB and
+Auth0 settings live in `atriumdb-api.env` from step 2.5, not here — keeping them
+apart means the dashboard's `.env`, which several services read, never holds the
+AtriumDB credentials.
+
 The two values that decide whether *this* container works:
 
 | Variable | What it must be |
 |---|---|
 | `ATRIUMDB_DATASET_PATH` | Absolute host path from step 1 |
-| `ATRIUMDB_STATISTICS_TIMEOUT_SECONDS` | Backend's per-request budget for `POST /cohorts/statistics`; raise it if aggregation over large cohorts times out |
+| `ATRIUMDB_STATISTICS_TIMEOUT_SECONDS` | Backend's per-request budget for `POST /cohorts/statistics`; raise it if aggregation over large cohorts times out. Over UAT this budget matters more than it did locally — every window now crosses the network |
 
 Also set `JWT_SECRET` to a generated value and change `POSTGRES_PASSWORD` —
 neither affects this container, but the stack is not safe to expose without them.
@@ -245,14 +432,18 @@ docker compose build               # 3. build the three buildable images
 docker compose up -d atriumdb-api  # 4. start THIS service alone
 docker compose logs -f atriumdb-api        # 5. watch it boot, Ctrl-C to detach
 docker compose exec atriumdb-api ls -l /data/atriumdb   # 6. prove the mount
-docker compose up -d               # 7. start the other three
-docker compose ps                  # 8. all four Up
-docker compose logs -f backend atriumdb-api   # 9. watch while you click through
+docker compose exec atriumdb-api python -c \
+  "import urllib.request;print(urllib.request.urlopen('http://localhost:8000/health/ready').read())"
+                                   # 7. prove both backends
+docker compose up -d               # 8. start the other three
+docker compose ps                  # 9. all four Up
+docker compose logs -f backend atriumdb-api   # 10. watch while you click through
 ```
 
-Steps 4–6 exist to fail fast: a wrong dataset path shows up there in seconds,
-rather than as an opaque 502 through two proxies after everything is running.
-The rest of this section explains each command.
+Steps 4–7 exist to fail fast: a wrong dataset path, an unreachable MariaDB or a
+rejected Auth0 client shows up there in seconds, rather than as an opaque 502
+through two proxies after everything is running. The rest of this section
+explains each command.
 
 ### Step 4 — build
 
@@ -319,10 +510,26 @@ docker compose logs -f atriumdb-api      # expect: "Uvicorn running on http://0.
   detached: it returns to the shell instead of streaming logs. Without `-d` the
   container dies when you close the SSH session.
 * `docker compose logs -f atriumdb-api` — prints this container's stdout/stderr
-  and `-f` keeps following as new lines arrive. You are waiting for
-  `Uvicorn running on http://0.0.0.0:8000`; anything else (a Python traceback, an
-  immediate exit) means the image or the config is wrong. **Ctrl-C stops the log
-  stream, not the container** — the service keeps running after you detach.
+  and `-f` keeps following as new lines arrive. **Ctrl-C stops the log stream,
+  not the container** — the service keeps running after you detach.
+
+  Two lines to look for, in order:
+
+  ```
+  Dashboard configuration: metadata: mariadb ro@db.host:3306/atrium | data api: https://host/api/v1 (auth0 client_credentials)
+  Uvicorn running on http://0.0.0.0:8000
+  ```
+
+  The first is `check_configuration()` reporting what it resolved — read it, and
+  confirm it names the backends you meant. Secrets are redacted, so a password
+  appearing there is a bug worth reporting. For a local deployment it reads
+  `data api: not configured`, and a warning follows saying the statistics and
+  time-series routes will 503.
+
+  A configuration problem stops the container **before** uvicorn starts, so a
+  `ConfigError` naming a variable and no "Uvicorn running" line means exactly
+  what it says. Anything else — a traceback, an immediate exit — means the image
+  is wrong.
 
 Confirm the dataset actually landed, and read-only:
 
@@ -346,6 +553,28 @@ docker compose exec atriumdb-api touch /data/atriumdb/_wtest
   `:ro` flag is in effect and no container can modify patient data. If it
   succeeds, the mount lost its `:ro` — stop and fix that before going further
   (and delete the stray `_wtest` file it created).
+
+Then prove both backends are actually reachable:
+
+```bash
+docker compose exec atriumdb-api python -c \
+  "import urllib.request;print(urllib.request.urlopen('http://localhost:8000/health/ready').read())"
+```
+
+`/health/ready` checks each backend independently and always returns HTTP 200 —
+it is a diagnostic, and an orchestrator that restarted the container on a
+transient API outage would make things worse. Read the body:
+
+| Response | Meaning |
+|---|---|
+| `{"metadata": "ok", "data_api": "ok"}` | both backends reachable — UAT is fully configured |
+| `{"metadata": "ok", "data_api": "not configured"}` | expected for a local SQLite deployment |
+| `{"metadata": "unavailable: ...", ...}` | MariaDB unreachable, or credentials rejected |
+| `{..., "data_api": "unavailable: AuthError"}` | Auth0 rejected the client — wrong secret, or the client is not authorised for that audience |
+| `{..., "data_api": "unavailable: ValueError"}` | Auth0 issued a token but the API refused it, or `ATRIUMDB_API_URL` is wrong. A 404 here usually means a missing version segment in the URL |
+
+`/health` (no `/ready`) stays a pure liveness probe that touches neither backend,
+which is what compose should gate `depends_on` on.
 
 Then run the route checks in §5. Do this **before** starting the other three
 services — a dataset-path mistake surfaces here in seconds, versus as an opaque
@@ -398,6 +627,7 @@ Every command runs from `~/sickkids/SickKids_Dashboard`.
 |---|---|
 | Status | `docker compose ps` |
 | Follow logs | `docker compose logs -f atriumdb-api` |
+| Check both backends | `docker compose exec atriumdb-api python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:8000/health/ready').read())"` |
 | Last 200 log lines | `docker compose logs --tail=200 atriumdb-api` |
 | Restart (no code change) | `docker compose restart atriumdb-api` |
 | Stop just this service | `docker compose stop atriumdb-api` |
@@ -421,6 +651,24 @@ rebuilt, because `COPY . .` bakes the source in at build time. (The `-e` editabl
 install means the source tree inside the image is live, but the image's copy of
 it is only refreshed by a rebuild.)
 
+### Rotating a credential
+
+Neither the MariaDB password nor the Auth0 secret is baked into the image, so a
+rotation is a file edit and a restart — no rebuild:
+
+```bash
+cd ~/sickkids/SickKids_Dashboard
+$EDITOR ./atriumdb-api.env
+docker compose up -d atriumdb-api      # recreates with the new environment
+```
+
+`docker compose restart` is **not** enough: it restarts the process with the
+container's existing environment, which was fixed when the container was created.
+`up -d` notices the changed `env_file` and recreates it.
+
+The Auth0 token itself needs no attention — it is held only in memory, re-minted
+near expiry, and never written to disk.
+
 ### Rolling back
 
 ```bash
@@ -438,9 +686,9 @@ docker system df                 # see what is actually using space
 Never `docker system prune -a --volumes` on this box: `--volumes` destroys the
 dashboard's Postgres data.
 
-## 5. Verifying the four routes
+## 5. Verifying the routes
 
-The dashboard calls exactly four routes on this service. The image has Python but
+The dashboard calls five routes on this service. The image has Python but
 **no curl**, so probe with `urllib`. Run these from the dashboard directory; the
 first form talks to the container directly, which is enough for all four.
 
@@ -482,15 +730,23 @@ PY
 ```
 
 `POST /cohorts/statistics` is the same shape with an `AggregateStatisticsRequest`
-body. It **requires a non-empty `X-Request-ID`** and returns 400 without one —
-that is deliberate, not a fault.
+body, and `POST /cohorts/timeseries` with a `TimeSeriesRequest`. Both **require a
+non-empty `X-Request-ID`** and return 400 without one — that is deliberate, not a
+fault. Both return **503** when `ATRIUMDB_API_URL` is unset, which is also
+deliberate: the routes exist but have no backend to serve them.
 
-| Dashboard call | Served by | Response it parses |
-|---|---|---|
-| `POST /cohorts` | `cohort_endpoints.post_cohorts` | `MrnCohortResponse` |
-| `POST /cohorts/statistics` | `cohort_endpoints.post_cohort_statistics` | `AggregateStatisticsResponse` |
-| `GET /measures/hours` | `measures_endpoints.get_measure_total_hours` | bare list of per-measure hour rows |
-| `GET /measures/` | `measures_endpoints.search_measures` | `{measure_id: measure_info}` |
+| Dashboard call | Served by | SDK it uses | Response it parses |
+|---|---|---|---|
+| `POST /cohorts` | `cohort_endpoints.post_cohorts` | metadata | `MrnCohortResponse` |
+| `POST /cohorts/statistics` | `statistics_endpoints.post_cohort_statistics` | **data** | `AggregateStatisticsResponse` |
+| `POST /cohorts/timeseries` | `timeseries_endpoints.post_cohort_timeseries` | **data** | `TimeSeriesResponse` |
+| `GET /measures/hours` | `measures_endpoints.get_measure_total_hours` | metadata | bare list of per-measure hour rows |
+| `GET /measures/` | upstream `measures_endpoints.search_measures` | metadata | `{measure_id: measure_info}` |
+
+The SDK column is worth reading when a route misbehaves: the two marked **data**
+are the only ones that touch the API and Auth0, so a failure confined to those
+two is an API-side problem, and one affecting the others is a metadata-side
+problem. `/health/ready` reports the same split.
 
 Two behaviours the dashboard depends on, so do not "fix" them casually:
 
@@ -511,9 +767,15 @@ a real request model.
 
 ## 6. Troubleshooting
 
+Configuration problems now surface **at startup**, not on the first request:
+`check_configuration()` runs at import and refuses to start, naming what is
+missing. If the container is serving at all, the configuration parsed.
+
 | Symptom | Cause | Fix |
 |---|---|---|
-| `ATRIUMDB_DATASET_LOCATION is not set` at first request | env var missing from the service | It is set in `docker-compose.yml`; confirm you are on the deploy branch of the dashboard repo |
+| Container exits at startup, `ConfigError: ... is missing required environment variable(s): X, Y` | exactly what it says | Add them to `atriumdb-api.env` (step 2.5) or `docker-compose.yml`; every missing name is listed at once |
+| `ConfigError: ATRIUMDB_API_URL is set ... no way to authenticate` | API URL given without the `AUTH0_*` set | Supply the Auth0 values, or unset `ATRIUMDB_API_URL` to run without the data backend |
+| `ATRIUMDB_DATASET_LOCATION is not set` at startup | env var missing from the service | It is set in `docker-compose.yml`; confirm you are on the deploy branch of the dashboard repo. Required in `mariadb` mode too — see §1 |
 | `No Dataset found at location /data/atriumdb` | mount points at the wrong directory, or one level too high/low | `docker compose exec atriumdb-api ls -l /data/atriumdb` — must show `meta/` and `tsc/` |
 | `/data/atriumdb` is empty | `ATRIUMDB_DATASET_PATH` does not exist on the host; Docker created an empty dir | Fix the path in `.env`, then `docker compose up -d atriumdb-api` |
 | `Permission denied` reading `meta/index.db` | dataset not readable by the Docker user | `chmod`/`chown` on the host, or run compose as a user that can read it |
@@ -522,7 +784,14 @@ a real request model.
 | `OSError: AtriumSDK is not currently supported on macOS` | ran the SDK outside the container | Always go through Docker |
 | Backend logs `AtriumDB unreachable at http://atriumdb-api:8000` | this container is down or crashed at import | `docker compose ps`, then `docker compose logs atriumdb-api` |
 | First request after start is slow, later ones fast | expected — the SDK is built once and cached | none |
-| Other requests hang while a long statistics query runs | the routes are `async def` around synchronous SDK calls, so each request holds the event loop until it finishes — requests are effectively serialized | expected under one user; if concurrent use becomes real, either declare the routes `def` (FastAPI then runs them in its threadpool) or add uvicorn workers |
+| `/cohorts/statistics` or `/cohorts/timeseries` returns **503** | `ATRIUMDB_API_URL` not configured, or a token could not be obtained | Check `/health/ready`; the detail names which |
+| 503 with `AuthError` | Auth0 rejected the client | `access_denied` = not authorised for that audience; `unauthorized_client` = client_credentials not enabled; `invalid_client` = wrong id or secret. The log carries Auth0's own message |
+| Auth works, measures read, then statistics hangs | `wss://` blocked while `https://` is open | Block transfers use the websocket. Open `wss://` to the API host — see §2 |
+| `404` on every API call, but the token is fine | `ATRIUMDB_API_URL` missing its version segment | The SDK appends bare endpoint names; the prefix must be in the base URL (`https://host/api/v1`) |
+| Statistics returns 200 with every patient excluded | the measure or the patients exist in MariaDB but not in the UAT dataset | Expected and by design — the two backends can differ in coverage. Check the exclusion log for the reason per patient |
+| A cohort comes back smaller than expected, many `MRN_NOT_FOUND` | possibly genuine, possibly a transient API fault | The SDK cannot distinguish a 404 from a server error when resolving MRNs, so an API problem looks like unknown MRNs. A sudden spike in that count means suspect the API, not the data |
+| `ValueError: The connection is already borrowed` | MariaDB pooling left on | Should not occur: `get_meta_sdk` passes `no_pool=True` precisely to prevent it. If it appears, that argument was lost |
+| Long statistics query blocks other requests | should no longer happen | The routes are plain `def`, so FastAPI runs them in its threadpool and `/health` stays responsive. Block transfers are still serialised by a lock, so concurrent statistics requests queue on the websocket — expected, and not the same as blocking everything |
 
 ## 7. Optional dashboard-side follow-up
 
@@ -546,13 +815,20 @@ properly instead of merely for the container to exist. In
         condition: service_healthy      # was: service_started
 ```
 
+Use `/health`, not `/health/ready`, for this. `/health` answers whether the
+process is serving; `/health/ready` reaches out to MariaDB and the API, so
+gating `depends_on` on it would mean a transient API outage stops the whole
+stack from coming up. `/health/ready` is for humans and monitoring.
+
 That change belongs to the dashboard repo, not this one.
 
 ## 8. Standing caveat
 
 `tests/mock_api/` is a **test fixture** — no authentication, no error envelope,
 no configuration surface — and this deployment serves it as the production API
-layer. That is defensible on a closed research server where the only client is
+layer. Note this is about the API *this container exposes* to the dashboard
+backend, not the upstream AtriumDB API it now consumes for waveform data; those
+are opposite directions and only the former is a fixture. That is defensible on a closed research server where the only client is
 the backend on a private bridge network, but it is a choice, not an accident. If
 a real AtriumDB server exists elsewhere, the better move is to point the
 dashboard's `ATRIUMDB_URL` at it and delete the `atriumdb-api` service from
