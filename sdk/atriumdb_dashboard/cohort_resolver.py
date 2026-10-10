@@ -271,6 +271,13 @@ def _resolve_mrn_cohort(
         )
 
     if not recognised:
+        _LOGGER.debug(
+            "[%s] MRN Cohort Definition — cohort %r: included patient_ids=[]; "
+            "excluded no_admission_in_range patient_ids=[]; not_found_count=%s",
+            request_id,
+            cohort.id,
+            len(unrecognised),
+        )
         return []
 
     # Step 2 — admission range check (no location filter: any unit qualifies)
@@ -308,6 +315,20 @@ def _resolve_mrn_cohort(
             admission_date_range.start,
             admission_date_range.end,
             no_admission_in_range,
+        )
+
+    # Logged by patient_id so the trace can be matched against the
+    # time-series debug lines without exposing MRNs. Unrecognised MRNs have no
+    # patient row, hence no patient_id, so only their count is recorded.
+    if _LOGGER.isEnabledFor(logging.DEBUG):
+        _LOGGER.debug(
+            "[%s] MRN Cohort Definition — cohort %r: included patient_ids=%s; "
+            "excluded no_admission_in_range patient_ids=%s; not_found_count=%s",
+            request_id,
+            cohort.id,
+            sorted(patient_admissions),
+            sorted(mrn_to_pid[m] for m in no_admission_in_range),
+            len(unrecognised),
         )
 
     return [

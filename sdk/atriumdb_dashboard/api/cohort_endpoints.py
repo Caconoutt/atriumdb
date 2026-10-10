@@ -25,7 +25,6 @@ SDK for all routers at once.
 Callers wire the router up with
 :func:`~atriumdb_dashboard.api.app.mount_dashboard`.
 """
-import logging
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
@@ -36,7 +35,6 @@ from atriumdb_dashboard.locations import UnknownLocationError
 from atriumdb_dashboard.schemas import CohortDefinitionRequest, MrnCohortResponse
 
 router = APIRouter()
-_LOGGER = logging.getLogger(__name__)
 
 
 @router.post("", response_model=MrnCohortResponse)
@@ -67,20 +65,10 @@ async def post_cohorts(
         dataset.
     """
     try:
-        response = resolve_cohort(sdk, body, request_id=x_request_id)
+        return resolve_cohort(sdk, body, request_id=x_request_id)
     except UnknownLocationError as exc:
         # Locations are validated against the database, so this check cannot
         # run in the Pydantic model the way the sex and date-range checks do.
         # Translating it here keeps bad input a 422 rather than a 500, matching
         # how every other invalid field behaves.
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    
-    if _LOGGER.isEnabledFor(logging.DEBUG):
-        _LOGGER.debug(
-            "[%s] POST /cohorts response n_cohorts=%s sizes=%s body=%s\n",
-            x_request_id,
-            len(response.cohorts),
-            {c.id: len(c.patients) for c in response.cohorts},
-            response.model_dump_json(by_alias=True),  
-        )
-    return response
