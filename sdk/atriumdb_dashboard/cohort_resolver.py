@@ -415,6 +415,12 @@ def _resolve_demographic_cohort(
         patient_visits.setdefault(record["patient_id"], []).append(record)
 
     if not patient_visits:
+        _LOGGER.debug(
+            "[%s] Demographic Cohort Definition — cohort %r: included "
+            "patient_ids=[]",
+            request_id,
+            cohort.id,
+        )
         return []
 
     # Stage 2 — fetch demographics for the candidate patient set
@@ -434,6 +440,8 @@ def _resolve_demographic_cohort(
     # passes the age filter. All qualifying visit admissions are returned.
     surviving_patients: list[PatientAdmission] = []
     patients_without_mrn: list[int] = []
+    # Collected only for the DEBUG trace below.
+    included_ids: list[int] = []
 
     for pid, visit_list in patient_visits.items():
         demo = demographics.get(pid, {})
@@ -477,6 +485,7 @@ def _resolve_demographic_cohort(
                 qualifying_admissions.append(_to_admission(visit))
 
         if qualifying_admissions:
+            included_ids.append(pid)
             surviving_patients.append(
                 PatientAdmission(
                     mrn=str(mrn),
@@ -491,6 +500,16 @@ def _resolve_demographic_cohort(
             request_id,
             cohort.id,
             patients_without_mrn,
+        )
+
+    # Logged by patient_id rather than MRN, matching the MRN-cohort trace.
+    if _LOGGER.isEnabledFor(logging.DEBUG):
+        _LOGGER.debug(
+            "[%s] Demographic Cohort Definition — cohort %r: included "
+            "patient_ids=%s",
+            request_id,
+            cohort.id,
+            sorted(included_ids),
         )
 
     return surviving_patients
