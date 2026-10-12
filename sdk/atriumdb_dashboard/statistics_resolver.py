@@ -201,6 +201,16 @@ def _process_cohort(
             observation_window_ns = window_end_ns - window_start_ns
             availability = covered_ns / observation_window_ns
 
+            # Logged for every entry, pass or fail: an entry with no data stops
+            # here, before get_data is ever called.
+            _LOGGER.debug(
+                "[%s] Statistics get_interval_array measure_id=%s patient_id=%s "
+                "window=[%s, %s] n_intervals=%s covered_ns=%s availability=%.4f",
+                request_id, measure_id, patient_id, window_start_ns, window_end_ns,
+                "None" if interval_arr is None else len(interval_arr),
+                covered_ns, availability,
+            )
+
             if availability < request.availability_threshold:
                 # print(f"[DEBUG] mrn={mrn}  admission_ns={admission_ns}  availability={availability:.3f}  -> EXCLUDED: below_availability_threshold")
                 exclusions.append(_make_exclusion(
@@ -224,7 +234,6 @@ def _process_cohort(
                 window_end_ns=window_end_ns,
                 value_range=value_range,
                 availability_threshold=request.availability_threshold,
-                request_id=request_id,
             )
             if reason is not None:
                 exclusions.append(_make_exclusion(
@@ -326,7 +335,6 @@ def _extract_patient_mean(
     window_end_ns: int,
     value_range: ValueRange | None,
     availability_threshold: float,
-    request_id: str,
 ) -> tuple[float | None, ExclusionReason | None, float | None]:
     """Fetch window values, drop out-of-range samples, and return the per-entry mean.
 
@@ -342,8 +350,6 @@ def _extract_patient_mean(
             start_time_n=window_start_ns,
             end_time_n=window_end_ns,
         )
-        _log_get_data(request_id, measure_id, patient_id, window_start_ns,
-                      window_end_ns, nan_filled=False, values=values)
         if values is None:
             values = np.array([])
         values = values[usable_mask(values, None)]
@@ -364,8 +370,6 @@ def _extract_patient_mean(
         end_time_n=window_end_ns,
         return_nan_filled=True,
     )
-    _log_get_data(request_id, measure_id, patient_id, window_start_ns,
-                  window_end_ns, nan_filled=True, values=values)
     if values is None or len(values) == 0:
         return None, ExclusionReason.NO_USABLE_VALUES, None
 
@@ -380,33 +384,6 @@ def _extract_patient_mean(
         return None, ExclusionReason.NO_USABLE_VALUES, None
 
     return float(np.mean(in_range)), None, None
-
-
-def _log_get_data(
-    request_id: str,
-    measure_id: int,
-    patient_id: int,
-    window_start_ns: int,
-    window_end_ns: int,
-    nan_filled: bool,
-    values: np.ndarray | None,
-) -> None:
-    """DEBUG trace of one ``get_data`` result: its length and finite count, not the values.
-
-    ``n_values`` alone says little in the NaN-filled branch, where the grid length
-    is fixed by the window and frequency; ``n_finite`` is the real data present.
-    Guarded so the count is skipped entirely when DEBUG is off.
-    """
-    if not _LOGGER.isEnabledFor(logging.DEBUG):
-        return
-    _LOGGER.debug(
-        "[%s] Statistics get_data measure_id=%s patient_id=%s window=[%s, %s] "
-        "nan_filled=%s n_values=%s n_finite=%s",
-        request_id, measure_id, patient_id, window_start_ns, window_end_ns,
-        nan_filled,
-        "None" if values is None else len(values),
-        "None" if values is None else int(np.count_nonzero(np.isfinite(values))),
-    )
 
 
 # ---------------------------------------------------------------------------
