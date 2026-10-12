@@ -178,6 +178,7 @@ def _process_cohort(
                     request_id=request_id,
                     cohort_id=cohort_id,
                     mrn=mrn,
+                    patient_id=patient_id,
                     reason=ExclusionReason.MISSING_DISCHARGE_TIME,
                     admission_ns=admission_ns,
                 ))
@@ -206,6 +207,7 @@ def _process_cohort(
                     request_id=request_id,
                     cohort_id=cohort_id,
                     mrn=mrn,
+                    patient_id=patient_id,
                     reason=ExclusionReason.BELOW_AVAILABILITY_THRESHOLD,
                     admission_ns=admission_ns,
                     window=(window_start_ns, window_end_ns),
@@ -228,6 +230,7 @@ def _process_cohort(
                     request_id=request_id,
                     cohort_id=cohort_id,
                     mrn=mrn,
+                    patient_id=patient_id,
                     reason=reason,
                     admission_ns=admission_ns,
                     window=(window_start_ns, window_end_ns),
@@ -256,6 +259,11 @@ def _process_cohort(
                     # the encounter → unit join already happened upstream.
                     location=admission.location,
                 )
+            )
+            _LOGGER.debug(
+                "[%s] Statistics — cohort %s: patient_id=%s admission_ns=%s "
+                "INCLUDED mean=%.4f",
+                request_id, cohort_id, patient_id, admission_ns, mean,
             )
 
     n_excluded = len(exclusions)
@@ -380,8 +388,13 @@ def _make_exclusion(
     admission_ns: int | None = None,
     window: tuple[int, int] | None = None,
     availability: float | None = None,
+    patient_id: int | None = None,
 ) -> ExclusionRecord:
-    """Build an ExclusionRecord, write it to the exclusions logger, and return it."""
+    """Build an ExclusionRecord, write it to the exclusions logger, and return it.
+
+    ``patient_id`` feeds only the DEBUG trace; it is ``None`` for
+    ``mrn_not_found``, where the MRN never mapped to a patient.
+    """
     record = ExclusionRecord(
         mrn=mrn,
         admission_ns=admission_ns,
@@ -403,4 +416,12 @@ def _make_exclusion(
     if availability is not None:
         parts.append(f"availability={availability:.4f}")
     _EXCLUSION_LOGGER.warning("  ".join(parts))
+    # Per-entry trace by patient_id, mirroring the INCLUDED line in
+    # _process_cohort, so one grep shows every entry's outcome.
+    _LOGGER.debug(
+        "[%s] Statistics — cohort %s: patient_id=%s admission_ns=%s "
+        "EXCLUDED reason=%s availability=%s",
+        request_id, cohort_id, patient_id, admission_ns, reason.value,
+        "None" if availability is None else f"{availability:.4f}",
+    )
     return record
