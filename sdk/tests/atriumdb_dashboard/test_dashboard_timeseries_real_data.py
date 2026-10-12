@@ -135,8 +135,11 @@ def test_timeseries_real_dataset(sdk, request_body, capsys):
         assert {iv.n_included + iv.n_excluded for iv in cohort.intervals} == {
             cohort.n_visits
         }
-        # Entry-level drops can only be mrn_not_found under a fixed window.
-        assert {e.reason.value for e in cohort.patient_exclusions} <= {"mrn_not_found"}
+        # Entry-level drops under a fixed window: an unresolved MRN, or no device
+        # mapping in the admission with data to anchor the window.
+        assert {e.reason.value for e in cohort.patient_exclusions} <= {
+            "mrn_not_found", "no_device_data"
+        }
 
 
 # ---------------------------------------------------------------------------

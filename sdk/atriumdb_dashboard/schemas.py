@@ -282,6 +282,9 @@ class ExclusionReason(str, Enum):
     BELOW_AVAILABILITY_THRESHOLD = "below_availability_threshold"
     NO_USABLE_VALUES = "no_usable_values"
     MISSING_DISCHARGE_TIME = "missing_discharge_time"
+    # No device mapping starting within the admission has data for the measure,
+    # so there is nothing to anchor the observation window to.
+    NO_DEVICE_DATA = "no_device_data"
 
 class ValueRange(_Base):
     """Signal value bounds applied during retrieval.
@@ -383,7 +386,8 @@ class ExclusionRecord(_Base):
     :param reason: The pipeline stage that dropped this entry; see
         :class:`ExclusionReason` for the full set of values.
     :param window_start_ns: Observation window start; ``None`` for
-        ``mrn_not_found``, and for ``missing_discharge_time`` where no window
+        ``mrn_not_found``, for ``no_device_data`` where no device mapping could
+        anchor a window, and for ``missing_discharge_time`` where no window
         could be bounded.
     :param window_end_ns: Observation window end; ``None`` in the same cases as
         ``window_start_ns``.
@@ -668,9 +672,9 @@ class VisitExclusion(_Base):
     :param visit: 0-based index into the enclosing
         :attr:`CohortTimeSeries.visits`.
     :param reason: Why this visit was dropped. In
-        :attr:`CohortTimeSeries.patient_exclusions` this is always
-        ``mrn_not_found`` — the only entry-level drop reachable under a fixed
-        observation window. In :attr:`IntervalResult.exclusions` it is
+        :attr:`CohortTimeSeries.patient_exclusions` this is ``mrn_not_found``
+        or ``no_device_data`` — the only entry-level drops reachable under a
+        fixed observation window. In :attr:`IntervalResult.exclusions` it is
         ``below_availability_threshold`` or ``no_usable_values``.
     :param availability: This interval's covered fraction ``[0, 1]``; present
         only for ``below_availability_threshold``.

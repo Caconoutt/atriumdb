@@ -98,7 +98,8 @@ _COHORT_NAME_MAP: dict[int, str] = {v: k for k, v in _COHORT_ID_MAP.items()}
     reason="STATS_MEASURE_TAG not set — fill in the measure constants above.",
 )
 def test_cohort_statistics_real_data(sdk):
-    """S2: per-patient mean signal over a 24-hour window anchored at admission.
+    """S2: per-patient mean signal over a 24-hour window anchored at the first
+    device mapping in each admission with data for the measure.
 
     Cohort membership and admission timestamps come from
     EXPECTED_DEMOGRAPHIC_ADMISSIONS (pre-validated in Step 3 on s1_stats).

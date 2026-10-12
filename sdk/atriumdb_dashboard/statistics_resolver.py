@@ -21,12 +21,16 @@ Entry point: :func:`compute_aggregate_statistics`.
 
 Processing pipeline per cohort:
   3a. MRN → patient_id resolution via ``sdk.get_patient_id``
-  3b. Observation window = [admission_ns, admission_ns + observation_window], or
-      [admission_ns, discharge_ns] when observation_window is "all_time"
+  3b. Window anchor = start of the first device mapping within the admission
+      whose first window has data for the measure (``get_device_patient_mapping``
+      once per cohort, then ``get_interval_array`` per mapping tried); none →
+      ``no_device_data``. Observation window = [anchor, anchor +
+      observation_window], or [anchor, discharge_ns] when observation_window is
+      "all_time"
   3c. Availability check via ``sdk.get_interval_array``
   3d. Value extraction via ``sdk.get_data`` + NaN removal + per-patient mean
 
-Stages 3a, 3b, the value-range resolution and the demographics lookup are shared
+Stages 3a, 3b (anchor and window), the value-range resolution and the demographics lookup are shared
 with the time-series endpoint and live in :mod:`atriumdb_dashboard.pipeline`.
 Stage 3c/3d stay here: the whole-window availability gate is exactly what S3
 must not inherit, so it is deliberately not shared.
@@ -46,9 +50,11 @@ import numpy as np
 from atriumdb_dashboard.pipeline import (
     compute_observation_window,
     fetch_demographics,
+    fetch_device_mappings,
     resolve_measure_id,
     resolve_patient_ids,
     resolve_value_range,
+    resolve_window_anchor,
     usable_mask,
 )
 from atriumdb_dashboard.schemas import (
@@ -145,6 +151,8 @@ def _process_cohort(
     # Step 3a — resolve MRN → patient_id
     mrn_to_pid = _resolve_patient_ids(sdk, cohort, request_id, exclusions)
     n_patients = len(mrn_to_pid)
+    # One mapping lookup for the whole cohort; step 3b anchors from it.
+    device_mappings = fetch_device_mappings(sdk, list(mrn_to_pid.values()))
 
     # Each (patient, admission) pair is one entry in the pipeline.
     n_visits = sum(
@@ -171,8 +179,42 @@ def _process_cohort(
         for admission in patient.admissions:
             admission_ns = admission.admission_ns
 
-            # Step 3b — observation window for this admission
-            window = compute_observation_window(admission, request.observation_window)
+            # Step 3b — anchor the window at the first device mapping in this
+            # admission with data for the measure, then bound it
+            anchor = resolve_window_anchor(
+                sdk=sdk,
+                measure_id=measure_id,
+                patient_id=patient_id,
+                admission=admission,
+                mappings=device_mappings.get(patient_id, []),
+                observation_window=request.observation_window,
+            )
+            if anchor is None:
+                _LOGGER.debug(
+                    "[%s] Statistics — cohort %s: patient_id=%s admission_ns=%s "
+                    "no device mapping in the admission with data",
+                    request_id, cohort_id, patient_id, admission_ns,
+                )
+                exclusions.append(_make_exclusion(
+                    request_id=request_id,
+                    cohort_id=cohort_id,
+                    mrn=mrn,
+                    patient_id=patient_id,
+                    reason=ExclusionReason.NO_DEVICE_DATA,
+                    admission_ns=admission_ns,
+                ))
+                continue
+            anchor_ns, anchor_device_id = anchor
+            _LOGGER.debug(
+                "[%s] Statistics — cohort %s: patient_id=%s admission_ns=%s "
+                "anchor_ns=%s device_id=%s",
+                request_id, cohort_id, patient_id, admission_ns, anchor_ns,
+                anchor_device_id,
+            )
+
+            window = compute_observation_window(
+                anchor_ns, admission, request.observation_window
+            )
             if window is None:
                 exclusions.append(_make_exclusion(
                     request_id=request_id,
