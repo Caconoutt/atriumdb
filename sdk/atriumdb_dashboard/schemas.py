@@ -125,6 +125,10 @@ class AgeBand(_Base):
 
     AtriumDB receives nanosecond values directly and does not perform any
     further unit conversion.
+
+    The band is half-open, ``[start_ns, end_ns)``: an age equal to
+    ``start_ns`` qualifies, an age equal to ``end_ns`` does not, so adjacent
+    bands such as ``[0, 1y)`` and ``[1y, 2y)`` never overlap.
     """
 
     start_ns: int

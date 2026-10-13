@@ -477,8 +477,10 @@ def _resolve_demographic_cohort(
                     age_ok = False  # unknown dob — cannot verify age
                 else:
                     age_at_admission_ns = admit_time_ns - dob_ns
+                    # Half-open [start, end): a patient exactly at end_ns has
+                    # aged out of the band (e.g. "0–1 year" excludes day 365).
                     age_ok = any(
-                        band.start_ns <= age_at_admission_ns <= band.end_ns
+                        band.start_ns <= age_at_admission_ns < band.end_ns
                         for band in cohort.age
                     )
             if age_ok:
