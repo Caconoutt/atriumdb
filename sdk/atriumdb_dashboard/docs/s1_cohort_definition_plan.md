@@ -97,7 +97,7 @@ dependency, safe to import anywhere.
 | `AdmissionDateRange` | `start`/`end` epoch ns window, inclusive both sides |
 | `Admission` | One qualifying admission: `admissionNs`, `dischargeNs` (nullable), `location` (nullable) |
 | `PatientAdmission` | `mrn` + `admissions`: all that patient's qualifying admissions, ascending by `admissionNs` |
-| `AgeBand` | `startNs`/`endNs` age range in nanoseconds |
+| `AgeBand` | `startMonths`/`endMonths` half-open age range in completed calendar months (`year * 12 + month`) |
 | `MrnCohort` | `id` + `mrnList` for 1A requests |
 | `DemographicCohort` | `id` + optional `age`, `sex`, `location`, `valueRange` for 1B |
 | `CohortDefinitionRequest` | Top-level request: `type` (`"mrn"`/`"demographic"`), `admissionDateRange`, `cohorts` |
@@ -323,7 +323,7 @@ with no qualifying patients is still returned, with an empty `patients` list.
 | 1b | `group_encounters_by_admission(...)` → all admissions kept per patient, grouped by `(visit_number, unit_name)` |
 | 2 | `sdk.sql_handler.select_all_patients_in_list(patient_id_list=...)` for demographics; candidates with no MRN on record are logged and dropped |
 | 3 | Sex filter — **patient level**: only `"M"` and `"F"` are requestable, so NULL / empty / `'U'` in `patient.gender` matches neither and is dropped |
-| 3b | Age filter — **per admission**: `band.start_ns <= (admit_time_ns - dob_ns) <= band.end_ns`. Patients with no `dob` fail every band when an age filter is present |
+| 3b | Age filter — **per admission**: `band.start_months <= _completed_months(dob_ns, admit_time_ns) < band.end_months`, age in completed calendar months (UTC dates). Patients with no `dob` fail every band when an age filter is present |
 | 4 | Keep the patient if at least one admission passed; return only the admissions that passed, sorted by `admission_ns` |
 
 Age is evaluated at each admission's own `admit_time_ns` rather than once per patient, so a

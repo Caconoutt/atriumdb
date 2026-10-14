@@ -189,8 +189,7 @@ DEMOGRAPHIC_COHORTS: list[DemographicCohort] = [
     DemographicCohort(
         id="male_age_10_0_15_0",
         sex=["M"],
-        age=[AgeBand(start_ns=10 * ONE_YEAR_NS + 0 * ONE_MONTH_NS,
-                     end_ns=15 * ONE_YEAR_NS + 0 * ONE_MONTH_NS)],
+        age=[AgeBand(start_months=10 * 12 + 0, end_months=15 * 12 + 0)],
         location=["ICU"],
     ),
     ...

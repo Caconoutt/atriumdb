@@ -34,6 +34,7 @@ depending on the request type.
 
 from __future__ import annotations
 
+import datetime
 import logging
 import time
 from typing import TYPE_CHECKING
@@ -58,6 +59,23 @@ if TYPE_CHECKING:
     from atriumdb import AtriumSDK
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _completed_months(dob_ns: int, ref_ns: int) -> int:
+    """Age in completed calendar months at ``ref_ns`` for a birth at ``dob_ns``.
+
+    Calendar dates in UTC, time of day ignored: a month completes on the same
+    day-of-month as the birth date, so whole years complete on the birthday
+    itself. A birth on the 29th–31st completes its month on the first day of
+    the next month when the reference month is shorter (e.g. a 29 Feb birth
+    turns one on 1 Mar of a non-leap year).
+    """
+    dob = datetime.datetime.fromtimestamp(dob_ns // 1_000_000_000, datetime.timezone.utc).date()
+    ref = datetime.datetime.fromtimestamp(ref_ns // 1_000_000_000, datetime.timezone.utc).date()
+    months = (ref.year - dob.year) * 12 + (ref.month - dob.month)
+    if ref.day < dob.day:
+        months -= 1
+    return months
 
 
 def _to_admission(record: dict) -> Admission:
@@ -367,9 +385,8 @@ def _resolve_demographic_cohort(
     **Stage 3 — Age and sex filters (Python)**
         Sex is a patient-level filter applied once per patient. Age is
         evaluated per visit at each visit's ``admit_time_ns`` (not the current
-        date)::
-
-            age_at_admission_ns = admit_time_ns - dob_ns
+        date), in completed calendar months (:func:`_completed_months`), and
+        must fall in ``[band.start_months, band.end_months)`` for some band.
 
         Only visits where the age filter passes are included in the patient's
         ``admissions`` list. Patients with ``dob = None`` are excluded from
@@ -476,11 +493,11 @@ def _resolve_demographic_cohort(
                 if dob_ns is None:
                     age_ok = False  # unknown dob — cannot verify age
                 else:
-                    age_at_admission_ns = admit_time_ns - dob_ns
-                    # Half-open [start, end): a patient exactly at end_ns has
-                    # aged out of the band (e.g. "0–1 year" excludes day 365).
+                    age_months = _completed_months(dob_ns, admit_time_ns)
+                    # Half-open [start, end): a patient on the birthday that
+                    # reaches end_months has aged out of the band.
                     age_ok = any(
-                        band.start_ns <= age_at_admission_ns < band.end_ns
+                        band.start_months <= age_months < band.end_months
                         for band in cohort.age
                     )
             if age_ok:

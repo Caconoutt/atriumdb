@@ -117,22 +117,29 @@ class PatientAdmission(_Base):
 
 
 class AgeBand(_Base):
-    """A single age band expressed in nanoseconds.
+    """A single age band expressed in completed calendar months.
 
-    Both bounds are pre-converted by the dashboard server using the convention::
+    Both bounds are ``year * 12 + month`` and are compared against the
+    patient's age in completed calendar months, so a patient enters a band on
+    the actual birthday (or monthly anniversary) rather than after a fixed
+    number of days — leap days and month lengths follow the calendar.
 
-        total_ns = (year * 365 + month * 30) * 86_400_000_000_000
-
-    AtriumDB receives nanosecond values directly and does not perform any
-    further unit conversion.
-
-    The band is half-open, ``[start_ns, end_ns)``: an age equal to
-    ``start_ns`` qualifies, an age equal to ``end_ns`` does not, so adjacent
-    bands such as ``[0, 1y)`` and ``[1y, 2y)`` never overlap.
+    The band is half-open, ``[start_months, end_months)``: an age equal to
+    ``start_months`` qualifies, an age equal to ``end_months`` does not, so
+    adjacent bands such as ``[0, 12)`` and ``[12, 60)`` never overlap.
     """
 
-    start_ns: int
-    end_ns: int
+    start_months: int
+    end_months: int
+
+    @model_validator(mode="after")
+    def _check_bounds(self) -> "AgeBand":
+        if self.start_months < 0 or self.end_months <= self.start_months:
+            raise ValueError(
+                f"age band must satisfy 0 <= start_months < end_months, got "
+                f"[{self.start_months}, {self.end_months})"
+            )
+        return self
 
 
 class MrnCohort(_Base):
@@ -155,7 +162,8 @@ class DemographicCohort(_Base):
     values are ORed (e.g. ``sex=["F","U"]`` matches female *or* unknown).
 
     :param id: Caller-assigned cohort identifier returned unchanged in the response.
-    :param age: Optional list of age bands in nanoseconds. Age is evaluated at
+    :param age: Optional list of age bands in completed calendar months
+        (see :class:`AgeBand`). Age is evaluated at
         the patient's reference admission time (earliest in-range admit), not
         the current date. Patients with an unknown ``dob`` are excluded when
         this filter is present.
