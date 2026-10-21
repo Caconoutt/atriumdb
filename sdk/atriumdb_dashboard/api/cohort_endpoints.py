@@ -38,7 +38,7 @@ router = APIRouter()
 
 
 @router.post("", response_model=MrnCohortResponse)
-async def post_cohorts(
+def post_cohorts(
     body: CohortDefinitionRequest,
     x_request_id: str = Header(..., min_length=1, pattern=r"\S"),
     sdk: AtriumSDK = Depends(get_sdk_instance),

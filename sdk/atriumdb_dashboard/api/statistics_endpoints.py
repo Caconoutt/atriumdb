@@ -38,7 +38,7 @@ router = APIRouter()
 
 
 @router.post("/statistics", response_model=AggregateStatisticsResponse)
-async def post_cohort_statistics(
+def post_cohort_statistics(
     request: AggregateStatisticsRequest,
     x_request_id: str | None = Header(default=None),
     sdk: AtriumSDK = Depends(get_sdk_instance),

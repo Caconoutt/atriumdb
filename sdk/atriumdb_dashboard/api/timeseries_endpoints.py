@@ -42,7 +42,7 @@ router = APIRouter()
 
 
 @router.post("/timeseries", response_model=TimeSeriesResponse)
-async def post_cohort_timeseries(
+def post_cohort_timeseries(
     request: TimeSeriesRequest,
     x_request_id: str | None = Header(default=None),
     sdk: AtriumSDK = Depends(get_sdk_instance),

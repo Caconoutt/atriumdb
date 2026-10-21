@@ -34,7 +34,7 @@ router = APIRouter()
 
 
 @router.get("/hours")
-async def get_measure_total_hours(
+def get_measure_total_hours(
         atriumdb_sdk: AtriumSDK = Depends(get_sdk_instance)):
     """Return per-measure data-coverage hours across all devices.
 
