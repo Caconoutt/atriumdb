@@ -65,7 +65,7 @@ Returns: TimeSeriesResponse
 
 - `cohorts` — pre-resolved cohorts from the Step 1 resolver (`CohortInput`), each with patients, their qualifying admissions, and an optional per-cohort `value_range`. **Reused unchanged.**
 - `measure` — the signal to analyse (`MeasureIdentifier`). **Reused unchanged.**
-- `observation_window` — fixed window length in epoch ns, anchored at each admission (e.g. 24 h). See the [all_time decision](#52--observation-window-fixed-only-for-v1).
+- `observation_window` — fixed window length in epoch ns, anchored at the start of the first device mapping in each admission that has data for the measure (see *Window anchor* below) (e.g. 24 h). See the [all_time decision](#52--observation-window-fixed-only-for-v1).
 - **`interval_ns`** *(new)* — bucket width in epoch ns (e.g. 5 min = `300_000_000_000`). The window is chopped into consecutive intervals of this width.
 - `availability_threshold` — minimum covered fraction, applied **per interval, and only per interval**. **Required, with no default** ([3.2](#32-new-request-model)). Unlike S2, S3 has **no window-level availability gate**: an entry is never dropped for being sparse across the observation window as a whole. It enters bucketing as long as it resolves a patient and a window, and its availability is then judged independently in each interval. A visit with data in only 3 of 288 intervals therefore appears in `patient_results` for those 3 and in `exclusions` for the other 285 — it is not excluded at the entry level.
 - `value_range` — optional signal bounds (`ValueRangeMap`), same semantics as S2: out-of-range samples are treated as absent and reduce availability. **Reused unchanged**, applied per interval.
@@ -552,3 +552,14 @@ sdk/
 3. **Write `timeseries_resolver.py`**, starting with the two-pass visit table and `patient_exclusions`, then the bucketing loop. Index stability is the part worth writing tests for first.
 4. **Add the endpoint and mount it**, then the mocked-SDK suite.
 5. **Run the real-dataset test**, including the one-call-vs-two-call availability comparison from [6.3](#63-test_dashboard_timeseries_real_datapy--real-dataset). Only after that is the [4.1](#41--fetch-once-bucket-in-memory) decision confirmed rather than assumed.
+
+## Window anchor (added in `s3_test`)
+
+The observation window no longer starts at the encounter's admission time. For each admission, the pipeline (`pipeline.resolve_window_anchor`) takes the patient's device mappings in start order and anchors the window at the first mapping that overlaps the admission and has data for the requested measure within its first window. A mapping that was already running when the admission was registered is clipped to start at the admission, so the anchor never precedes it. An admission with no such mapping is excluded as `no_device_data`.
+
+Consequences for reading results:
+
+- "First 24 h" means the first 24 h after monitoring of *this measure* began in the admission, not after admission. Two measures can anchor at different times for the same admission.
+- Time-series interval offsets are measured from the anchor.
+- **Pending clinical sign-off:** this definition replaces admission-anchored windows; confirm it is the intended one before results are reported.
+
