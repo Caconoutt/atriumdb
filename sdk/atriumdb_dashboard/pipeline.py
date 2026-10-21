@@ -172,14 +172,17 @@ def resolve_window_anchor(
     stretch where no signal could exist. Anchoring at a device mapping instead
     starts the window when this measure was actually being recorded.
 
-    Mappings are tried in start order. One is a candidate only if it starts
-    within the admission — at or after ``admission_ns`` and, for a closed stay,
-    no later than ``discharge_ns``; a mapping that began before the admission is
-    ignored even if it overlaps it. A candidate is taken when the patient has
-    data for ``measure_id`` in its first window: ``observation_window`` from the
-    mapping start, or up to the discharge under ``"all_time"``, in either case
-    cut short by the mapping's own end. The check is by ``patient_id``, the same
-    way the availability step reads the data.
+    Mappings are tried in start order. One is a candidate if it overlaps the
+    admission: it ends after ``admission_ns`` (or is still open) and, for a
+    closed stay, starts no later than ``discharge_ns``. A mapping that began
+    before the admission — a monitor connected before the ADT admission was
+    registered, or one mapping spanning a transfer — is clipped to start at
+    ``admission_ns``, so the anchor never precedes the admission. A candidate is
+    taken when the patient has data for ``measure_id`` in its first window:
+    ``observation_window`` from the (clipped) mapping start, or up to the
+    discharge under ``"all_time"``, in either case cut short by the mapping's
+    own end. The check is by ``patient_id``, the same way the availability step
+    reads the data.
 
     :param sdk: AtriumSDK instance in direct-DB mode.
     :param measure_id: The measure whose data qualifies a mapping.
@@ -188,9 +191,10 @@ def resolve_window_anchor(
     :param mappings: This patient's mappings from :func:`fetch_device_mappings`.
     :param observation_window: A fixed length in nanoseconds, or
         :data:`~atriumdb_dashboard.schemas.ALL_TIME`.
-    :return: The chosen mapping's start and device, or ``None`` when no mapping
-        in the admission has data for the measure — the caller excludes the
-        entry as ``no_device_data``.
+    :return: The chosen mapping's start (clipped to the admission) and device,
+        or ``None`` when no mapping overlapping the admission has data for the
+        measure in its first window — the caller excludes the entry as
+        ``no_device_data``.
     """
     # A discharge that does not follow the admission is an inconsistent record,
     # not a bound: treated as an open stay here, so a fixed window ignores it as
@@ -200,12 +204,15 @@ def resolve_window_anchor(
     if discharge_ns is not None and discharge_ns <= admission.admission_ns:
         discharge_ns = None
 
-    for device_id, start_ns, end_ns in mappings:
-        if start_ns < admission.admission_ns:
+    for device_id, mapping_start_ns, end_ns in mappings:
+        if end_ns is not None and end_ns <= admission.admission_ns:
+            # Ended before this admission began: no overlap.
             continue
-        if discharge_ns is not None and start_ns > discharge_ns:
+        if discharge_ns is not None and mapping_start_ns > discharge_ns:
             # Sorted by start, so every later mapping is past the stay as well.
             break
+        # A mapping already running at admission is anchored at the admission.
+        start_ns = max(mapping_start_ns, admission.admission_ns)
 
         if observation_window == ALL_TIME:
             check_end = discharge_ns

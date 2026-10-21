@@ -460,7 +460,7 @@ def test_timeseries_no_device_data_recorded_once_not_per_interval():
     """An entry with no anchoring mapping is dropped before bucketing: recorded
     once in patientExclusions, absent from every interval and from nVisits."""
     resp = _post_ts(
-        _mock_sdk(mapping_starts=(ADMIT_NS - ONE_MIN_NS,)),  # before the admission
+        _mock_sdk(mapping_starts=()),  # no device mapping at all
         _body([("MRN001", [ADMIT_NS])]),
     )
 

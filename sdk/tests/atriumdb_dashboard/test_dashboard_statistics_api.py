@@ -554,18 +554,20 @@ def test_statistics_window_anchors_at_first_mapping_with_data():
     assert exc["windowEndNs"] == later_ns + WINDOW_NS
 
 
-def test_statistics_mapping_before_admission_is_ignored():
-    """A mapping that began before the admission cannot anchor it, even though
-    it overlaps; with no other mapping the entry has no device data."""
+def test_statistics_mapping_before_admission_anchors_at_admission():
+    """A mapping already running when the admission was registered (monitor
+    connected before the ADT admission) is clipped to the admission: the window
+    starts at the admission, not at the mapping, and the entry is not dropped
+    as no_device_data. Low coverage is used only to surface the window bounds
+    through an exclusion record."""
     exc = _one_exclusion(_post_stats(
-        _mock_sdk(mapping_starts=(ADMIT_NS - ONE_HOUR_NS,)),
+        _mock_sdk(interval_arr=LOW_COVERAGE, mapping_starts=(ADMIT_NS - ONE_HOUR_NS,)),
         _body([("MRN001", [ADMIT_NS])]),
     ))
 
-    assert exc["reason"] == "no_device_data"
-    assert exc["admissionNs"] == ADMIT_NS
-    assert exc["windowStartNs"] is None
-    assert exc["windowEndNs"] is None
+    assert exc["reason"] == "below_availability_threshold"
+    assert exc["windowStartNs"] == ADMIT_NS
+    assert exc["windowEndNs"] == ADMIT_NS + WINDOW_NS
 
 
 def test_statistics_no_mapping_with_data_is_excluded():
