@@ -163,9 +163,9 @@ class DemographicCohort(_Base):
 
     :param id: Caller-assigned cohort identifier returned unchanged in the response.
     :param age: Optional list of age bands in completed calendar months
-        (see :class:`AgeBand`). Age is evaluated at
-        the patient's reference admission time (earliest in-range admit), not
-        the current date. Patients with an unknown ``dob`` are excluded when
+        (see :class:`AgeBand`). Age is evaluated per visit, at each
+        visit's own admission time, not the current date; only the visits whose
+        age falls in a band qualify. Patients with an unknown ``dob`` are excluded when
         this filter is present.
     :param sex: Optional list of sex codes, one of ``VALID_SEX_CODES``
         (``"M"`` or ``"F"``). Accepted case-insensitively and normalised to
@@ -294,8 +294,10 @@ class ExclusionReason(str, Enum):
     BELOW_AVAILABILITY_THRESHOLD = "below_availability_threshold"
     NO_USABLE_VALUES = "no_usable_values"
     MISSING_DISCHARGE_TIME = "missing_discharge_time"
-    # No device mapping starting within the admission has data for the measure,
-    # so there is nothing to anchor the observation window to.
+    # No device mapping overlapping the admission has data for the measure
+    # within its first observation window, so there is nothing to anchor the
+    # window to. Also reached when the measure's data only begins later in the
+    # stay than one window from every mapping's start.
     NO_DEVICE_DATA = "no_device_data"
 
 class ValueRange(_Base):

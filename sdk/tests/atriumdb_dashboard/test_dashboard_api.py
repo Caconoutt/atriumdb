@@ -30,8 +30,9 @@ from atriumdb_dashboard.api.app import mount_dashboard
 # One provider shared by every dashboard router, so a single override covers
 # all of them.
 from atriumdb_dashboard.api.dependencies import get_sdk_instance
-from atriumdb_dashboard.cohort_resolver import _completed_months, resolve_cohort
+from atriumdb_dashboard.cohort_resolver import resolve_cohort
 from atriumdb_dashboard.locations import UnknownLocationError
+from atriumdb_dashboard.pipeline import age_months
 from atriumdb_dashboard.queries import (
     group_encounters_by_admission,
     query_measure_total_hours,
@@ -346,21 +347,26 @@ def _test_api_cohorts(db_type, dataset_location, connection_params):
 
 
 def test_completed_months_follows_the_calendar():
-    """Age bands compare completed calendar months, not 365-day years."""
+    """Age bands compare completed calendar months, not 365-day years.
+
+    The cohort filter and the reported ``age_months`` use this one function.
+    """
     def ns(y, m, d, hh=0):
         return int(datetime.datetime(y, m, d, hh, tzinfo=datetime.timezone.utc).timestamp()) * 10**9
 
     dob = ns(2015, 6, 15)
     # Day before the 5th birthday is still 4y11m, though it is past 5 * 365 days.
     assert ns(2020, 6, 14) - dob > 5 * 365 * 86_400 * 10**9
-    assert _completed_months(dob, ns(2020, 6, 14)) == 59
-    assert _completed_months(dob, ns(2020, 6, 15)) == 60
+    assert age_months(dob, ns(2020, 6, 14)) == 59
+    assert age_months(dob, ns(2020, 6, 15)) == 60
     # Time of day is ignored: the birthday completes at midnight.
-    assert _completed_months(ns(2015, 6, 15, 23), ns(2020, 6, 15, 0)) == 60
+    assert age_months(ns(2015, 6, 15, 23), ns(2020, 6, 15, 0)) == 60
     # 29 Feb birth turns one on 1 Mar of a non-leap year.
     leap = ns(2016, 2, 29)
-    assert _completed_months(leap, ns(2017, 2, 28)) == 11
-    assert _completed_months(leap, ns(2017, 3, 1)) == 12
+    assert age_months(leap, ns(2017, 2, 28)) == 11
+    assert age_months(leap, ns(2017, 3, 1)) == 12
+    # A dob after the reference time is an inconsistent record, not an age.
+    assert age_months(ns(2020, 1, 1), ns(2019, 12, 31)) is None
 
 
 def test_cohort_request_validation():

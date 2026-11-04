@@ -254,7 +254,6 @@ def _process_cohort(
             )
 
             if availability < request.availability_threshold:
-                # print(f"[DEBUG] mrn={mrn}  admission_ns={admission_ns}  availability={availability:.3f}  -> EXCLUDED: below_availability_threshold")
                 exclusions.append(_make_exclusion(
                     request_id=request_id,
                     cohort_id=cohort_id,

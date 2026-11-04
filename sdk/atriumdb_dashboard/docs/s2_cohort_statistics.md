@@ -5,7 +5,7 @@ statistics pipeline, the SDK method, the FastAPI endpoint, and the tests. It is 
 counterpart to `s1_cohort_definition_plan.md`.
 
 Given cohorts already resolved by S1, it computes **one mean signal value per (patient,
-admission)** over an observation window anchored at each admission, and reports every entry it
+admission)** over an observation window anchored at the start of the first device mapping in each admission that has data for the measure (see *Window anchor* below), and reports every entry it
 dropped and why. No cross-patient aggregation happens here — mean, median, SD, quartiles and KDE
 are all left to the dashboard.
 
@@ -17,7 +17,7 @@ are all left to the dashboard.
 - `cohorts` — pre-resolved cohorts from the S1 resolver. Each patient carries their qualifying
   admissions, already validated against the admission date range; S2 does not re-check them.
 - `measure` — the signal to analyse, identified by tag + frequency (+ optional units).
-- `observation_window` — either a fixed span in nanoseconds anchored at each admission, or
+- `observation_window` — either a fixed span in nanoseconds anchored at the start of the first device mapping in each admission that has data for the measure (see *Window anchor* below), or
   `"all_time"` to use the admission's own discharge as the end.
 - `availability_threshold` — minimum fraction of the window that must be covered by usable data.
 - `value_range` — optional signal bounds, globally and/or per cohort.
@@ -397,3 +397,14 @@ precisely so that this choice does not have to be final for anything computed do
 **API mode.** `compute_aggregate_statistics` is direct-DB only. If the dashboard ever needs to
 call an AtriumDB server over HTTP rather than embedding the SDK, this method needs the same
 `metadata_connection_type == "api"` branch that `dashboard_resolve_cohort` has.
+
+## Window anchor (added in `s3_test`)
+
+The observation window no longer starts at the encounter's admission time. For each admission, the pipeline (`pipeline.resolve_window_anchor`) takes the patient's device mappings in start order and anchors the window at the first mapping that overlaps the admission and has data for the requested measure within its first window. A mapping that was already running when the admission was registered is clipped to start at the admission, so the anchor never precedes it. An admission with no such mapping is excluded as `no_device_data`.
+
+Consequences for reading results:
+
+- "First 24 h" means the first 24 h after monitoring of *this measure* began in the admission, not after admission. Two measures can anchor at different times for the same admission.
+- Time-series interval offsets are measured from the anchor.
+- **Matches the reference definition:** the manual cohort-vs-dashboard test (2026-10-13) compared S2 against `liver_hr_first12h.py`, which starts each patient's window at their first device mapping with heart-rate data in its first 12 hours. Age is evaluated at admission start on both sides (the report's section 3).
+
