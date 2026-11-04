@@ -561,5 +561,5 @@ Consequences for reading results:
 
 - "First 24 h" means the first 24 h after monitoring of *this measure* began in the admission, not after admission. Two measures can anchor at different times for the same admission.
 - Time-series interval offsets are measured from the anchor.
-- **Pending clinical sign-off:** this definition replaces admission-anchored windows; confirm it is the intended one before results are reported.
+- **Matches the reference definition:** the manual cohort-vs-dashboard test (2026-10-13) compared S2 against `liver_hr_first12h.py`, which starts each patient's window at their first device mapping with heart-rate data in its first 12 hours. Age is evaluated at admission start on both sides (the report's section 3).
 
