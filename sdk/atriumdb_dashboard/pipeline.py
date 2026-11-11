@@ -18,8 +18,8 @@
 """Pipeline stages shared by the statistics (S2) and time-series (S3) resolvers.
 
 Both endpoints take the same cohort input and run the same opening stages —
-measure resolution, MRN → patient_id resolution, observation-window computation,
-value-range resolution, and demographics — before diverging on how they reduce
+measure resolution, MRN → patient_id resolution, device-mapping window anchoring,
+observation-window computation, value-range resolution, and demographics — before diverging on how they reduce
 the signal. Those stages live here so the two resolvers cannot drift apart.
 
 Every function is deliberately **request-model-agnostic**: it takes the scalars
@@ -128,33 +128,135 @@ def resolve_patient_ids(sdk: "AtriumSDK", cohort: CohortInput) -> dict[str, int]
 # Observation window
 # ---------------------------------------------------------------------------
 
+def fetch_device_mappings(
+    sdk: "AtriumSDK",
+    patient_ids: list[int],
+) -> dict[int, list[tuple[int, int, int | None]]]:
+    """Return each patient's device mappings as ``(device_id, start_ns, end_ns)``, sorted by start.
+
+    One ``get_device_patient_mapping`` call covers the whole cohort, so anchoring
+    every admission costs no further mapping lookups. ``end_ns`` is ``None`` for
+    a mapping that is still open.
+
+    :param sdk: AtriumSDK instance in direct-DB mode.
+    :param patient_ids: Resolved patient IDs of one cohort.
+    :return: Mapping of patient ID to that patient's mappings in start order.
+        Patients with no mapping are absent.
+    """
+    # An empty list would reach the SDK as "no patient filter" and return every
+    # mapping in the dataset.
+    if not patient_ids:
+        return {}
+    found: dict[int, list[tuple[int, int, int | None]]] = {}
+    for device_id, patient_id, start, end in sdk.get_device_patient_mapping(
+        patient_id_list=list(patient_ids)
+    ):
+        found.setdefault(int(patient_id), []).append(
+            (int(device_id), int(start), None if end is None else int(end))
+        )
+    return {pid: sorted(rows, key=lambda row: row[1]) for pid, rows in found.items()}
+
+
+def resolve_window_anchor(
+    sdk: "AtriumSDK",
+    measure_id: int,
+    patient_id: int,
+    admission: Admission,
+    mappings: list[tuple[int, int, int | None]],
+    observation_window: int | str,
+) -> tuple[int, int] | None:
+    """Return ``(anchor_ns, device_id)``: the first mapping in the admission with data.
+
+    The encounter start can precede the first monitor that recorded the measure
+    by hours or days, and a window anchored there measures availability over a
+    stretch where no signal could exist. Anchoring at a device mapping instead
+    starts the window when this measure was actually being recorded.
+
+    Mappings are tried in start order. One is a candidate only if it starts
+    within the admission — at or after ``admission_ns`` and, for a closed stay,
+    no later than ``discharge_ns``; a mapping that began before the admission is
+    ignored even if it overlaps it. A candidate is taken when the patient has
+    data for ``measure_id`` in its first window: ``observation_window`` from the
+    mapping start, or up to the discharge under ``"all_time"``, in either case
+    cut short by the mapping's own end. The check is by ``patient_id``, the same
+    way the availability step reads the data.
+
+    :param sdk: AtriumSDK instance in direct-DB mode.
+    :param measure_id: The measure whose data qualifies a mapping.
+    :param patient_id: The patient being anchored.
+    :param admission: The admission the anchor must fall within.
+    :param mappings: This patient's mappings from :func:`fetch_device_mappings`.
+    :param observation_window: A fixed length in nanoseconds, or
+        :data:`~atriumdb_dashboard.schemas.ALL_TIME`.
+    :return: The chosen mapping's start and device, or ``None`` when no mapping
+        in the admission has data for the measure — the caller excludes the
+        entry as ``no_device_data``.
+    """
+    # A discharge that does not follow the admission is an inconsistent record,
+    # not a bound: treated as an open stay here, so a fixed window ignores it as
+    # it always has, and an "all_time" window still reaches
+    # compute_observation_window and is excluded as missing_discharge_time.
+    discharge_ns = admission.discharge_ns
+    if discharge_ns is not None and discharge_ns <= admission.admission_ns:
+        discharge_ns = None
+
+    for device_id, start_ns, end_ns in mappings:
+        if start_ns < admission.admission_ns:
+            continue
+        if discharge_ns is not None and start_ns > discharge_ns:
+            # Sorted by start, so every later mapping is past the stay as well.
+            break
+
+        if observation_window == ALL_TIME:
+            check_end = discharge_ns
+        else:
+            check_end = start_ns + observation_window
+        if end_ns is not None:
+            check_end = end_ns if check_end is None else min(check_end, end_ns)
+        if check_end is not None and check_end <= start_ns:
+            continue
+
+        intervals = sdk.get_interval_array(
+            measure_id=measure_id,
+            patient_id=patient_id,
+            start=start_ns,
+            end=check_end,
+        )
+        if intervals is not None and len(intervals) > 0:
+            return start_ns, device_id
+    return None
+
+
 def compute_observation_window(
+    anchor_ns: int,
     admission: Admission,
     observation_window: int | str,
 ) -> tuple[int, int] | None:
     """Return ``(start_ns, end_ns)`` for this admission, or None if unbounded.
 
-    A fixed window runs for ``observation_window`` nanoseconds from the
-    admission. Under ``"all_time"`` it instead spans the admission itself, so
-    the stay's own discharge is what ends it.
+    The window starts at ``anchor_ns`` — the device-mapping anchor from
+    :func:`resolve_window_anchor`, not the encounter start. A fixed window runs
+    for ``observation_window`` nanoseconds from it. Under ``"all_time"`` it
+    instead runs to the stay's own discharge.
 
-    :param admission: The admission anchoring the window.
+    :param anchor_ns: Window start, from :func:`resolve_window_anchor`.
+    :param admission: The admission whose discharge ends an ``"all_time"`` window.
     :param observation_window: A fixed length in nanoseconds, or
         :data:`~atriumdb_dashboard.schemas.ALL_TIME`.
     :return: The window, or ``None`` when ``"all_time"`` was requested but this
         admission has no usable discharge — an open stay, or a discharge that
-        does not follow the admission. Such an entry has no window to measure
+        does not follow the anchor. Such an entry has no window to measure
         availability against, and the caller excludes it. A fixed window always
         bounds, so a caller that never passes ``"all_time"`` (S3) never sees
         ``None``.
     """
     if observation_window != ALL_TIME:
-        return admission.admission_ns, admission.admission_ns + observation_window
+        return anchor_ns, anchor_ns + observation_window
 
-    if admission.discharge_ns is None or admission.discharge_ns <= admission.admission_ns:
+    if admission.discharge_ns is None or admission.discharge_ns <= anchor_ns:
         return None
 
-    return admission.admission_ns, admission.discharge_ns
+    return anchor_ns, admission.discharge_ns
 
 
 # ---------------------------------------------------------------------------

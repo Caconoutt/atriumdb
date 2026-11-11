@@ -92,6 +92,17 @@ HALF_VALUES = np.array([1., 1., 1., 2., 2., 2., np.nan, np.nan, np.nan,
 #: Whole-window coverage is 1/12, far below any sane threshold.
 SPARSE_VALUES = np.array([7.] + [np.nan] * 11)
 
+#: Interval stub for the window-anchor check: any non-empty array means "this
+#: mapping has data for the measure".
+HAS_DATA = np.array([[ADMIT_NS, ADMIT_NS + WINDOW_NS]])
+NO_INTERVALS = np.empty((0, 2), dtype=np.int64)
+
+#: Default device-mapping starts for every patient: one at ADMIT_NS and one at
+#: the later admission the multi-admission test uses, so both anchor at their
+#: own admission_ns.
+SECOND_ADMIT_NS = ADMIT_NS + 10 * WINDOW_NS
+DEFAULT_MAPPING_STARTS = (ADMIT_NS, SECOND_ADMIT_NS)
+
 DOB_NS = ADMIT_NS - 30 * ONE_YEAR_NS
 PATIENT_INFO = {"gender": "M", "dob": DOB_NS}
 EXPECTED_AGE_MONTHS = 359
@@ -107,9 +118,14 @@ _UNSET = object()
 
 def _mock_sdk(values=None, values_by_mrn=None, unresolvable=(),
               patient_info=_UNSET, measure_id=MEASURE_ID, freq_nhz=FREQ_NHZ,
-              measure_info=_UNSET) -> MagicMock:
+              measure_info=_UNSET, mapping_starts=DEFAULT_MAPPING_STARTS,
+              interval_arr=HAS_DATA) -> MagicMock:
     """An SDK whose per-stage lookups are stubbed but whose time-series entry
     point runs the real resolver.
+
+    Every patient gets one open device mapping per entry of ``mapping_starts``,
+    and ``get_interval_array`` — used here only by the window-anchor check —
+    returns ``interval_arr``.
 
     ``get_data`` mirrors the real SDK's two return shapes: a 3-tuple normally,
     but a 2-tuple under ``return_nan_filled=True``, which is the only mode this
@@ -135,6 +151,13 @@ def _mock_sdk(values=None, values_by_mrn=None, unresolvable=(),
         return pids.setdefault(mrn, 100 + len(pids))
 
     sdk.get_patient_id.side_effect = _get_patient_id
+
+    def _get_device_patient_mapping(patient_id_list=None, **_):
+        return [(7, pid, start, None)
+                for pid in (patient_id_list or []) for start in mapping_starts]
+
+    sdk.get_device_patient_mapping.side_effect = _get_device_patient_mapping
+    sdk.get_interval_array.return_value = interval_arr
 
     by_mrn = values_by_mrn or {}
     default = FULL_VALUES if values is None else values
@@ -212,7 +235,8 @@ def test_timeseries_single_patient_bucketed():
 
 
 def test_timeseries_interval_indices_are_dense_with_correct_offsets():
-    """Interval indices run 0..N-1 with no holes, and offsets are from admission."""
+    """Interval indices run 0..N-1 with no holes, and offsets are from the window
+    anchor (here the admission itself, as a mapping starts exactly there)."""
     resp = _post_ts(_mock_sdk(), _body([("MRN001", [ADMIT_NS])]))
 
     intervals = _cohort_of(resp)["intervals"]
@@ -329,11 +353,12 @@ def test_timeseries_mrn_not_found_recorded_once_not_per_interval():
 
 
 def test_timeseries_patient_exclusions_are_single_reason():
-    """Under a fixed window, mrn_not_found is the only entry-level drop.
+    """With device data present, mrn_not_found is the only entry-level drop.
 
     missing_discharge_time needs the all_time branch, which this endpoint cannot
-    express, and there is no device stage. This assertion will fail loudly the
-    day another entry-level gate is added, which is the point.
+    express, and no_device_data needs an entry without an anchoring mapping —
+    covered separately below. This assertion will fail loudly the day another
+    entry-level gate is added, which is the point.
     """
     resp = _post_ts(
         _mock_sdk(unresolvable={"MRN404", "MRN405"}),
@@ -398,7 +423,7 @@ def test_timeseries_visit_indices_are_all_in_range():
 
 def test_timeseries_multiple_admissions_are_independent_visits():
     """Two admissions for one MRN produce two visits and two bucket series."""
-    second_admit = ADMIT_NS + 10 * WINDOW_NS
+    second_admit = SECOND_ADMIT_NS
     resp = _post_ts(_mock_sdk(), _body([("MRN001", [ADMIT_NS, second_admit])]))
 
     cohort = _cohort_of(resp)
@@ -408,6 +433,52 @@ def test_timeseries_multiple_admissions_are_independent_visits():
     # Both series are present in every interval, as distinct visit indices.
     for interval in cohort["intervals"]:
         assert sorted(r["visit"] for r in interval["patientResults"]) == [0, 1]
+
+
+# ---------------------------------------------------------------------------
+# Window anchor: first device mapping in the admission with data
+# ---------------------------------------------------------------------------
+
+def test_timeseries_window_anchors_at_first_mapping_with_data():
+    """A mapping with no data for the measure is skipped; the data fetch starts
+    at the next mapping that has some, and bucket 0 starts there."""
+    later_ns = ADMIT_NS + 5 * ONE_MIN_NS
+    sdk = _mock_sdk(mapping_starts=(ADMIT_NS, later_ns))
+    sdk.get_interval_array.side_effect = [NO_INTERVALS, HAS_DATA]
+
+    cohort = _cohort_of(_post_ts(sdk, _body([("MRN001", [ADMIT_NS])])))
+
+    assert cohort["patientExclusions"] == []
+    # The visit is still identified by its encounter admission...
+    assert cohort["visits"][0]["admissionNs"] == ADMIT_NS
+    # ...but the window it was bucketed over starts at the anchoring mapping.
+    fetch = sdk.get_data.call_args.kwargs
+    assert (fetch["start_time_n"], fetch["end_time_n"]) == (later_ns, later_ns + WINDOW_NS)
+
+
+def test_timeseries_no_device_data_recorded_once_not_per_interval():
+    """An entry with no anchoring mapping is dropped before bucketing: recorded
+    once in patientExclusions, absent from every interval and from nVisits."""
+    resp = _post_ts(
+        _mock_sdk(mapping_starts=(ADMIT_NS - ONE_MIN_NS,)),  # before the admission
+        _body([("MRN001", [ADMIT_NS])]),
+    )
+
+    cohort = _cohort_of(resp)
+    assert (cohort["nPatients"], cohort["nVisits"]) == (1, 0)
+    assert [(e["visit"], e["reason"]) for e in cohort["patientExclusions"]] == \
+        [(0, "no_device_data")]
+    for interval in cohort["intervals"]:
+        assert interval["patientResults"] == []
+        assert interval["exclusions"] == []
+
+
+def test_timeseries_no_mapping_with_data_is_excluded():
+    """Mappings exist in the admission but none has data for the measure."""
+    cohort = _cohort_of(_post_ts(
+        _mock_sdk(interval_arr=NO_INTERVALS), _body([("MRN001", [ADMIT_NS])]),
+    ))
+    assert [e["reason"] for e in cohort["patientExclusions"]] == ["no_device_data"]
 
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@
 #
 #     You should have received a copy of the GNU General Public License
 #     along with this program.  If not, see <https://www.gnu.org/licenses/>.
+import datetime
 import shutil
 import time
 import threading
@@ -29,7 +30,7 @@ from atriumdb_dashboard.api.app import mount_dashboard
 # One provider shared by every dashboard router, so a single override covers
 # all of them.
 from atriumdb_dashboard.api.dependencies import get_sdk_instance
-from atriumdb_dashboard.cohort_resolver import resolve_cohort
+from atriumdb_dashboard.cohort_resolver import _completed_months, resolve_cohort
 from atriumdb_dashboard.locations import UnknownLocationError
 from atriumdb_dashboard.queries import (
     group_encounters_by_admission,
@@ -212,14 +213,14 @@ def _test_api_cohorts(db_type, dataset_location, connection_params):
 
     print("Testing 1B: demographic cohort — age filter...")
 
-    # patient A is 25 years old at admission → falls in [20, 30]; patient B is 35 → does not
+    # patient A is 25 years old at admission → falls in [20y, 30y); patient B is 35 → does not
     request_1b_age = CohortDefinitionRequest(
         type="demographic",
         admission_date_range=date_range,
         cohorts=[DemographicCohort(
             id="cohort_1b_age",
             location=["ICU"],
-            age=[AgeBand(start_ns=20 * ONE_YEAR_NS, end_ns=30 * ONE_YEAR_NS)],
+            age=[AgeBand(start_months=20 * 12, end_months=30 * 12)],
         )],
     )
 
@@ -342,6 +343,24 @@ def _test_api_cohorts(db_type, dataset_location, connection_params):
     _test_invalid_input_is_rejected(sdk, date_range)
 
     api_sdk.close()
+
+
+def test_completed_months_follows_the_calendar():
+    """Age bands compare completed calendar months, not 365-day years."""
+    def ns(y, m, d, hh=0):
+        return int(datetime.datetime(y, m, d, hh, tzinfo=datetime.timezone.utc).timestamp()) * 10**9
+
+    dob = ns(2015, 6, 15)
+    # Day before the 5th birthday is still 4y11m, though it is past 5 * 365 days.
+    assert ns(2020, 6, 14) - dob > 5 * 365 * 86_400 * 10**9
+    assert _completed_months(dob, ns(2020, 6, 14)) == 59
+    assert _completed_months(dob, ns(2020, 6, 15)) == 60
+    # Time of day is ignored: the birthday completes at midnight.
+    assert _completed_months(ns(2015, 6, 15, 23), ns(2020, 6, 15, 0)) == 60
+    # 29 Feb birth turns one on 1 Mar of a non-leap year.
+    leap = ns(2016, 2, 29)
+    assert _completed_months(leap, ns(2017, 2, 28)) == 11
+    assert _completed_months(leap, ns(2017, 3, 1)) == 12
 
 
 def test_cohort_request_validation():

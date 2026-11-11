@@ -37,7 +37,6 @@ from atriumdb_dashboard.schemas import CohortDefinitionRequest, MrnCohortRespons
 router = APIRouter()
 
 
-
 @router.post("", response_model=MrnCohortResponse)
 async def post_cohorts(
     body: CohortDefinitionRequest,

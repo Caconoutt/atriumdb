@@ -34,6 +34,7 @@ depending on the request type.
 
 from __future__ import annotations
 
+import datetime
 import logging
 import time
 from typing import TYPE_CHECKING
@@ -58,6 +59,23 @@ if TYPE_CHECKING:
     from atriumdb import AtriumSDK
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _completed_months(dob_ns: int, ref_ns: int) -> int:
+    """Age in completed calendar months at ``ref_ns`` for a birth at ``dob_ns``.
+
+    Calendar dates in UTC, time of day ignored: a month completes on the same
+    day-of-month as the birth date, so whole years complete on the birthday
+    itself. A birth on the 29th–31st completes its month on the first day of
+    the next month when the reference month is shorter (e.g. a 29 Feb birth
+    turns one on 1 Mar of a non-leap year).
+    """
+    dob = datetime.datetime.fromtimestamp(dob_ns // 1_000_000_000, datetime.timezone.utc).date()
+    ref = datetime.datetime.fromtimestamp(ref_ns // 1_000_000_000, datetime.timezone.utc).date()
+    months = (ref.year - dob.year) * 12 + (ref.month - dob.month)
+    if ref.day < dob.day:
+        months -= 1
+    return months
 
 
 def _to_admission(record: dict) -> Admission:
@@ -271,6 +289,13 @@ def _resolve_mrn_cohort(
         )
 
     if not recognised:
+        _LOGGER.debug(
+            "[%s] MRN Cohort Definition — cohort %r: included patient_ids=[]; "
+            "excluded no_admission_in_range patient_ids=[]; not_found_count=%s",
+            request_id,
+            cohort.id,
+            len(unrecognised),
+        )
         return []
 
     # Step 2 — admission range check (no location filter: any unit qualifies)
@@ -310,6 +335,20 @@ def _resolve_mrn_cohort(
             no_admission_in_range,
         )
 
+    # Logged by patient_id so the trace can be matched against the
+    # time-series debug lines without exposing MRNs. Unrecognised MRNs have no
+    # patient row, hence no patient_id, so only their count is recorded.
+    if _LOGGER.isEnabledFor(logging.DEBUG):
+        _LOGGER.debug(
+            "[%s] MRN Cohort Definition — cohort %r: included patient_ids=%s; "
+            "excluded no_admission_in_range patient_ids=%s; not_found_count=%s",
+            request_id,
+            cohort.id,
+            sorted(patient_admissions),
+            sorted(mrn_to_pid[m] for m in no_admission_in_range),
+            len(unrecognised),
+        )
+
     return [
         PatientAdmission(
             mrn=patient_id_to_mrn[pid],
@@ -346,9 +385,8 @@ def _resolve_demographic_cohort(
     **Stage 3 — Age and sex filters (Python)**
         Sex is a patient-level filter applied once per patient. Age is
         evaluated per visit at each visit's ``admit_time_ns`` (not the current
-        date)::
-
-            age_at_admission_ns = admit_time_ns - dob_ns
+        date), in completed calendar months (:func:`_completed_months`), and
+        must fall in ``[band.start_months, band.end_months)`` for some band.
 
         Only visits where the age filter passes are included in the patient's
         ``admissions`` list. Patients with ``dob = None`` are excluded from
@@ -394,6 +432,12 @@ def _resolve_demographic_cohort(
         patient_visits.setdefault(record["patient_id"], []).append(record)
 
     if not patient_visits:
+        _LOGGER.debug(
+            "[%s] Demographic Cohort Definition — cohort %r: included "
+            "patient_ids=[]",
+            request_id,
+            cohort.id,
+        )
         return []
 
     # Stage 2 — fetch demographics for the candidate patient set
@@ -413,6 +457,8 @@ def _resolve_demographic_cohort(
     # passes the age filter. All qualifying visit admissions are returned.
     surviving_patients: list[PatientAdmission] = []
     patients_without_mrn: list[int] = []
+    # Collected only for the DEBUG trace below.
+    included_ids: list[int] = []
 
     for pid, visit_list in patient_visits.items():
         demo = demographics.get(pid, {})
@@ -447,15 +493,18 @@ def _resolve_demographic_cohort(
                 if dob_ns is None:
                     age_ok = False  # unknown dob — cannot verify age
                 else:
-                    age_at_admission_ns = admit_time_ns - dob_ns
+                    age_months = _completed_months(dob_ns, admit_time_ns)
+                    # Half-open [start, end): a patient on the birthday that
+                    # reaches end_months has aged out of the band.
                     age_ok = any(
-                        band.start_ns <= age_at_admission_ns <= band.end_ns
+                        band.start_months <= age_months < band.end_months
                         for band in cohort.age
                     )
             if age_ok:
                 qualifying_admissions.append(_to_admission(visit))
 
         if qualifying_admissions:
+            included_ids.append(pid)
             surviving_patients.append(
                 PatientAdmission(
                     mrn=str(mrn),
@@ -470,6 +519,16 @@ def _resolve_demographic_cohort(
             request_id,
             cohort.id,
             patients_without_mrn,
+        )
+
+    # Logged by patient_id rather than MRN, matching the MRN-cohort trace.
+    if _LOGGER.isEnabledFor(logging.DEBUG):
+        _LOGGER.debug(
+            "[%s] Demographic Cohort Definition — cohort %r: included "
+            "patient_ids=%s",
+            request_id,
+            cohort.id,
+            sorted(included_ids),
         )
 
     return surviving_patients

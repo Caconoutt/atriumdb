@@ -216,9 +216,6 @@ def test_mrn_cohort_real_data(sdk):
 DEMO_ADMIT_START_NS: int = 1577836800000000000  # 2020-01-01 00:00:00 UTC
 DEMO_ADMIT_END_NS:   int = 1609459200000000000  # 2021-01-01 00:00:00 UTC
 
-ONE_YEAR_NS: int = 365 * 24 * 3600 * 1_000_000_000
-ONE_MONTH_NS: int = 30 * 24 * 3600 * 1_000_000_000
-
 # Maps cohort_id → expected set of MRNs.
 EXPECTED_DEMOGRAPHIC_COHORTS: dict[str, set[str]] = {
     "male_age_10_0_15_0": {"MRN824A6D3E", "MRND62AADF3", "MRN79BFCA31"},
@@ -262,19 +259,19 @@ DEMOGRAPHIC_COHORTS: list[DemographicCohort] = [
     DemographicCohort(
         id="male_age_10_0_15_0",
         sex=["M"],
-        age=[AgeBand(start_ns=10 * ONE_YEAR_NS + 0 * ONE_MONTH_NS, end_ns=15 * ONE_YEAR_NS + 0 * ONE_MONTH_NS)],
+        age=[AgeBand(start_months=10 * 12 + 0, end_months=15 * 12 + 0)],
         location=["ICU"]
     ),
     DemographicCohort(
         id="female_age_10_3_15_10",
         sex=["F"],
-        age=[AgeBand(start_ns=10 * ONE_YEAR_NS + 3 * ONE_MONTH_NS, end_ns=15 * ONE_YEAR_NS + 10 * ONE_MONTH_NS)],
+        age=[AgeBand(start_months=10 * 12 + 3, end_months=15 * 12 + 10)],
         location=["ICU"]
     ),
     DemographicCohort(
         id="female_age_2_5_7_11",
         sex=["F"],
-        age=[AgeBand(start_ns=2 * ONE_YEAR_NS + 5 * ONE_MONTH_NS, end_ns=7 * ONE_YEAR_NS + 11 * ONE_MONTH_NS)],
+        age=[AgeBand(start_months=2 * 12 + 5, end_months=7 * 12 + 11)],
         location=["ICU"]
     ),
 ]

@@ -28,8 +28,12 @@ Processing pipeline per cohort:
   1. MRN → patient_id resolution (shared, :mod:`atriumdb_dashboard.pipeline`)
   2. Pass 1 — build the ``visits`` table over every entry, before any exclusion
      runs, so a visit index is simply the entry's position in the request
-  3. Pass 2 — per entry: one NaN-filled ``sdk.get_data`` call over the whole
-     window, then bucket the returned grid in memory
+  3. Pass 2 — per entry: anchor the window at the first device mapping within
+     the admission whose first window has data for the measure (shared with the
+     statistics endpoint; none → ``no_device_data``), then one NaN-filled
+     ``sdk.get_data`` call over the whole window, then bucket the returned grid
+     in memory. Interval offsets are therefore measured from that anchor, not
+     from the encounter start
 
 Two differences from the statistics endpoint are load-bearing:
 
@@ -39,7 +43,7 @@ Two differences from the statistics endpoint are load-bearing:
   it does cover. This is why S2's ``_extract_patient_mean`` is not reused —
   it contains exactly that gate.
 * **Exclusions land in two places.** A drop that removes the whole entry
-  (``mrn_not_found``) is recorded once in ``patient_exclusions``; a drop
+  (``mrn_not_found``, ``no_device_data``) is recorded once in ``patient_exclusions``; a drop
   specific to one bucket is recorded in that bucket. Recording an entry-level
   drop per interval would repeat it once per bucket.
 """
@@ -54,9 +58,11 @@ import numpy as np
 from atriumdb_dashboard.pipeline import (
     compute_observation_window,
     fetch_demographics,
+    fetch_device_mappings,
     resolve_measure_id,
     resolve_patient_ids,
     resolve_value_range,
+    resolve_window_anchor,
     usable_mask,
 )
 from atriumdb_dashboard.schemas import (
@@ -223,6 +229,8 @@ def _process_cohort(
     )
     mrn_to_pid = resolve_patient_ids(sdk, cohort)
     n_patients = len(mrn_to_pid)
+    # One mapping lookup for the whole cohort; PASS 2 anchors each window from it.
+    device_mappings = fetch_device_mappings(sdk, list(mrn_to_pid.values()))
 
     # PASS 1 — the visit table, built over every entry before any exclusion runs.
     # Appending only for entries that survive would make an index depend on how
@@ -252,13 +260,46 @@ def _process_cohort(
             ))
             continue
 
+        # Anchor at the first device mapping in this admission with data for the
+        # measure. Without one the entry has no window at all, so it is dropped
+        # before bucketing, like an unresolved MRN.
+        anchor = resolve_window_anchor(
+            sdk=sdk,
+            measure_id=measure_id,
+            patient_id=patient_id,
+            admission=admission,
+            mappings=device_mappings.get(patient_id, []),
+            observation_window=request.observation_window,
+        )
+        if anchor is None:
+            _LOGGER.debug(
+                "[%s] Time-series — cohort %s: patient_id=%s admission_ns=%s "
+                "no device mapping in the admission with data",
+                request_id, cohort_id, patient_id, admission.admission_ns,
+            )
+            patient_exclusions.append(_make_visit_exclusion(
+                request_id=request_id,
+                cohort_id=cohort_id,
+                mrn=mrn,
+                visit=visit,
+                reason=ExclusionReason.NO_DEVICE_DATA,
+            ))
+            continue
+        anchor_ns, anchor_device_id = anchor
+        _LOGGER.debug(
+            "[%s] Time-series — cohort %s: patient_id=%s admission_ns=%s "
+            "anchor_ns=%s device_id=%s",
+            request_id, cohort_id, patient_id, admission.admission_ns, anchor_ns,
+            anchor_device_id,
+        )
+
         n_visits += 1
 
         # A fixed observation window always bounds, so this never returns None —
         # the "all_time" branch that can is unreachable from this endpoint,
         # TimeSeriesRequest.observation_window being a PositiveInt.
         window_start_ns, window_end_ns = compute_observation_window(
-            admission, request.observation_window
+            anchor_ns, admission, request.observation_window
         )
 
         values = _fetch_window_values(
@@ -553,8 +594,8 @@ def _make_visit_exclusion(
 ) -> VisitExclusion:
     """Build an entry-level VisitExclusion, log it, and return it.
 
-    Entry-level only: these are few (one per unresolved MRN), so each gets its
-    own line. Interval-level drops are summarised by
+    Entry-level only: these are few (one per unresolved MRN or unanchored
+    entry), so each gets its own line. Interval-level drops are summarised by
     :func:`_log_interval_drops` instead.
 
     The record itself carries only the visit index — the MRN is resolved by the

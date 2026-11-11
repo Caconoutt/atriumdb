@@ -83,6 +83,13 @@ PATIENT_ID = 42
 
 FULL_COVERAGE = np.array([[ADMIT_NS, ADMIT_NS + WINDOW_NS]])
 LOW_COVERAGE = np.array([[ADMIT_NS, ADMIT_NS + 10 * ONE_HOUR_NS]])  # 10/24 ≈ 41 %
+NO_INTERVALS = np.empty((0, 2), dtype=np.int64)
+
+#: Default device-mapping starts for every patient: one at ADMIT_NS, and one at
+#: the later admission several tests use (ADMIT_NS + 30 days), so each of those
+#: admissions has a mapping starting exactly at it and anchors at admission_ns.
+SECOND_ADMIT_NS = ADMIT_NS + 30 * 24 * ONE_HOUR_NS
+DEFAULT_MAPPING_STARTS = (ADMIT_NS, SECOND_ADMIT_NS)
 
 GOOD_VALUES = np.array([95.0, 96.0, float("nan"), 97.0])  # non-NaN mean = 96.0
 ALL_NAN = np.array([float("nan"), float("nan")])
@@ -105,9 +112,15 @@ _UNSET = object()
 # ---------------------------------------------------------------------------
 
 def _mock_sdk(measure_id=MEASURE_ID, patient_id=PATIENT_ID,
-              interval_arr=None, values=None, patient_info=_UNSET) -> MagicMock:
+              interval_arr=None, values=None, patient_info=_UNSET,
+              mapping_starts=DEFAULT_MAPPING_STARTS) -> MagicMock:
     """An SDK whose per-stage lookups are stubbed but whose statistics entry
     point runs the real resolver, so the stubs below are genuinely exercised.
+
+    ``get_device_patient_mapping`` gives every requested patient one open
+    mapping per entry of ``mapping_starts``. ``get_interval_array`` serves both
+    the anchor check and the step-3c availability check, so a test that
+    sequences it with ``side_effect`` must account for both calls.
 
     ``get_patient_info`` must be stubbed explicitly: a bare MagicMock returns a
     MagicMock for ``gender``, which fails PatientResult validation with a 422
@@ -124,6 +137,12 @@ def _mock_sdk(measure_id=MEASURE_ID, patient_id=PATIENT_ID,
     sdk.get_patient_id.return_value = patient_id
     sdk.get_interval_array.return_value = FULL_COVERAGE if interval_arr is None else interval_arr
     sdk.get_patient_info.return_value = PATIENT_INFO if patient_info is _UNSET else patient_info
+
+    def _get_device_patient_mapping(patient_id_list=None, **_):
+        return [(7, pid, start, None)
+                for pid in (patient_id_list or []) for start in mapping_starts]
+
+    sdk.get_device_patient_mapping.side_effect = _get_device_patient_mapping
 
     resolved_values = GOOD_VALUES if values is None else values
 
@@ -248,11 +267,15 @@ def test_statistics_two_patients_get_independent_means():
 def test_statistics_multiple_admissions_are_scored_separately():
     """Two admissions for one patient are independent entries: one may be
     excluded while the other is included."""
-    admit_2 = ADMIT_NS + 30 * 24 * ONE_HOUR_NS
+    admit_2 = SECOND_ADMIT_NS
 
     sdk = _mock_sdk()
+    # Per admission: the anchor check, then the step-3c availability check.
     # First admission falls under the availability threshold, second does not.
-    sdk.get_interval_array.side_effect = [LOW_COVERAGE, FULL_COVERAGE]
+    sdk.get_interval_array.side_effect = [
+        FULL_COVERAGE, LOW_COVERAGE,
+        FULL_COVERAGE, FULL_COVERAGE,
+    ]
     resp = _post_stats(sdk, _body([("MRN001", [ADMIT_NS, admit_2])]))
 
     cohort = _cohort_of(resp)
@@ -492,7 +515,7 @@ def test_statistics_all_time_mixed_admissions():
     """One patient with a closed and an open stay: the closed one resolves, the
     open one is excluded — per-admission handling under all_time."""
     discharge_ns = ADMIT_NS + 72 * ONE_HOUR_NS
-    open_admit_ns = ADMIT_NS + 30 * 24 * ONE_HOUR_NS
+    open_admit_ns = SECOND_ADMIT_NS
 
     resp = _post_stats(
         _mock_sdk(interval_arr=np.array([[ADMIT_NS, discharge_ns]])),
@@ -506,6 +529,84 @@ def test_statistics_all_time_mixed_admissions():
     assert cohort["patientResults"][0]["admissionNs"] == ADMIT_NS
     assert cohort["exclusions"][0]["admissionNs"] == open_admit_ns
     assert cohort["exclusions"][0]["reason"] == "missing_discharge_time"
+
+
+# ---------------------------------------------------------------------------
+# Window anchor: first device mapping in the admission with data
+# ---------------------------------------------------------------------------
+
+def test_statistics_window_anchors_at_first_mapping_with_data():
+    """A mapping with no data for the measure is skipped; the window starts at
+    the next mapping that has some, not at the encounter start."""
+    later_ns = ADMIT_NS + 5 * ONE_HOUR_NS
+    sdk = _mock_sdk(mapping_starts=(ADMIT_NS, later_ns))
+    # Anchor check on mapping 1 (empty), anchor check on mapping 2 (data), then
+    # step 3c — low, so the exclusion reports the window it measured.
+    sdk.get_interval_array.side_effect = [NO_INTERVALS, FULL_COVERAGE, LOW_COVERAGE]
+
+    exc = _one_exclusion(_post_stats(sdk, _body([("MRN001", [ADMIT_NS])])))
+
+    assert exc["reason"] == "below_availability_threshold"
+    # The entry is still identified by its encounter admission...
+    assert exc["admissionNs"] == ADMIT_NS
+    # ...but its window starts at the anchoring mapping.
+    assert exc["windowStartNs"] == later_ns
+    assert exc["windowEndNs"] == later_ns + WINDOW_NS
+
+
+def test_statistics_mapping_before_admission_is_ignored():
+    """A mapping that began before the admission cannot anchor it, even though
+    it overlaps; with no other mapping the entry has no device data."""
+    exc = _one_exclusion(_post_stats(
+        _mock_sdk(mapping_starts=(ADMIT_NS - ONE_HOUR_NS,)),
+        _body([("MRN001", [ADMIT_NS])]),
+    ))
+
+    assert exc["reason"] == "no_device_data"
+    assert exc["admissionNs"] == ADMIT_NS
+    assert exc["windowStartNs"] is None
+    assert exc["windowEndNs"] is None
+
+
+def test_statistics_no_mapping_with_data_is_excluded():
+    """Mappings exist in the admission but none has data for the measure."""
+    exc = _one_exclusion(_post_stats(
+        _mock_sdk(interval_arr=NO_INTERVALS), _body([("MRN001", [ADMIT_NS])]),
+    ))
+    assert exc["reason"] == "no_device_data"
+
+
+def test_statistics_patient_without_mappings_is_excluded():
+    """A patient with no device mapping at all has nothing to anchor to."""
+    exc = _one_exclusion(_post_stats(
+        _mock_sdk(mapping_starts=()), _body([("MRN001", [ADMIT_NS])]),
+    ))
+    assert exc["reason"] == "no_device_data"
+
+
+def test_statistics_all_time_window_starts_at_anchor():
+    """Under all_time the window runs from the anchor, not the encounter start,
+    to the discharge."""
+    anchor_ns = ADMIT_NS + 2 * ONE_HOUR_NS
+    discharge_ns = ADMIT_NS + 72 * ONE_HOUR_NS
+    exc = _one_exclusion(_post_stats(
+        _mock_sdk(interval_arr=LOW_COVERAGE, mapping_starts=(anchor_ns,)),
+        _body([("MRN001", [(ADMIT_NS, discharge_ns)])], observation_window="all_time"),
+    ))
+
+    assert exc["reason"] == "below_availability_threshold"
+    assert exc["windowStartNs"] == anchor_ns
+    assert exc["windowEndNs"] == discharge_ns
+
+
+def test_statistics_all_time_open_stay_without_device_data():
+    """No device data and an open stay: anchoring runs first, so the entry is
+    reported as no_device_data rather than missing_discharge_time."""
+    exc = _one_exclusion(_post_stats(
+        _mock_sdk(mapping_starts=()),
+        _body([("MRN001", [ADMIT_NS])], observation_window="all_time"),
+    ))
+    assert exc["reason"] == "no_device_data"
 
 
 # ---------------------------------------------------------------------------
